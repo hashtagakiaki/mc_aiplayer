@@ -15,4 +15,13 @@ public record TaskStatus(
     public static TaskStatus from(Task task) {
         return new TaskStatus(task.name(), task.describe(), task.state(), task.progress(), task.failureReason(), task.elapsedTicks());
     }
+
+    /**
+     * Builds the terminal status for a manager-settled failure. The manager owns this
+     * reason because it is also the reason delivered to the goal recovery path.
+     */
+    public static TaskStatus failed(Task task, String reason) {
+        return new TaskStatus(task.name(), task.describe(), TaskState.FAILED,
+                task.progress(), reason, task.elapsedTicks());
+    }
 }

@@ -269,6 +269,21 @@ public final class BrainCoordinator {
         if (io.github.zoyluo.aibot.goal.GoalExecutor.INSTANCE.hasActivePlan(bot)) {
             return false;
         }
+        boolean terminalStuckFailurePending = TaskManager.INSTANCE.peekFailure(bot)
+                .flatMap(failure -> io.github.zoyluo.aibot.goal.GoalExecutor.INSTANCE
+                        .lastResult(bot)
+                        .filter(result -> result.reason().equals(failure.reason())))
+                .isPresent();
+        if (io.github.zoyluo.aibot.goal.GoalExecutor.INSTANCE.hasTerminalStuckResult(bot)
+                && terminalStuckFailurePending) {
+            // GoalExecutor already exhausted its bounded recovery and published the terminal
+            // result. Consume only that matching failure; stale goal results must not suppress
+            // a later unrelated task wake.
+            TaskManager.INSTANCE.consumeFailure(bot);
+            awaitingTask.remove(bot.getUuid());
+            BotLog.comm(bot, "terminal_stuck_goal_wake_suppressed");
+            return false;
+        }
         boolean hasFailure = TaskManager.INSTANCE.peekFailure(bot).isPresent();
         boolean hasGoal = BotMemoryStore.INSTANCE.of(bot.getUuid()).hasActiveGoal();
         // FLOW-2:idle-watcher 仅在无活跃任务时调用本方法,故 awaiting=true 即代表"大脑分配的任务已结束"。
@@ -426,6 +441,13 @@ public final class BrainCoordinator {
                     try {
                         conversation.continuationTaskPolls = 0;
                         if (maybeInjectGoalResult(bot, conversation)) {
+                            if (io.github.zoyluo.aibot.goal.GoalExecutor.INSTANCE
+                                    .hasTerminalStuckResult(bot)) {
+                                awaitingTask.remove(bot.getUuid());
+                                conversation.decision.invalidate();
+                                BotLog.comm(bot, "terminal_stuck_goal_settled");
+                                return;
+                            }
                             trimHistory(conversation);
                             submit(bot, conversation, nextLease);
                             return;

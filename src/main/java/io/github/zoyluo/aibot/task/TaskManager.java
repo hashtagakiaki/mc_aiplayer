@@ -99,6 +99,30 @@ public final class TaskManager {
         abort(bot, true);
     }
 
+    /**
+     * Ends the active task as a failure whose reason is shared by the task status and
+     * the pending failure consumed by goal recovery. This retains normal task abort
+     * cleanup while avoiding a later, conflicting failure record.
+     */
+    public Optional<TaskStatus> failActive(AIPlayerEntity bot, String reason, int tick) {
+        UUID uuid = bot.getUuid();
+        Task current = active.remove(uuid);
+        activeOrigins.remove(uuid);
+        if (current == null) {
+            return Optional.empty();
+        }
+
+        current.abort(bot);
+        if (current instanceof AbstractTask abstractTask) {
+            abstractTask.failureReason = reason;
+        }
+        TaskStatus failed = TaskStatus.failed(current, reason);
+        lastStatus.put(uuid, failed);
+        recordFailure(bot, current.name(), reason, tick);
+        BotReporter.INSTANCE.onStatus(bot.getServer(), bot, failed);
+        return Optional.of(failed);
+    }
+
     private void abort(AIPlayerEntity bot, boolean publishStatus) {
         Task current = active.remove(bot.getUuid());
         activeOrigins.remove(bot.getUuid());

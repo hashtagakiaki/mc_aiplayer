@@ -15,6 +15,12 @@ AIBot 将“代码通过测试”“场景在本机通过”和“可作为发�
 
 当前源码测试清单是 19 个 JUnit 类、68 个测试和 3 个 GameTest。当前本地诊断中，strict/operator 的 capability + runtime-control suite 均为 `7/7 PASS`；两 JVM persistence probe 精确恢复 checkpoint map，并在 resume 后得到原 Mission 的 `COMPLETED 4/4`。这些数字描述本次工作树的验证，不替代 clean-commit evidence gate。
 
+## No-progress settlement
+
+`StuckWatcher` uses the configured no-progress window for active finite tasks. `isWaiting()` may exempt a task only while a concrete task-owned wait condition is true or the command is intentionally ongoing. For quota farming, an immature crop counts as a wait target only when the crop block itself is observable. An unobservable cell remains unknown; it is not reported as empty. Empty `DONE`/survey cycles remain under the existing monitor window.
+
+When the window expires, `TaskManager` stops the active task through its normal cleanup and publishes one `stuck:<task>` reason to task status and the failure record. `GoalExecutor` uses its existing bounded deterministic replanning. A terminal no-progress goal is reported and does not trigger a new model turn to recreate the same work. These rules describe source behavior only; they do not claim live-server verification.
+
 ## 生产边界
 
 `AIBotTestSubcommand`、`AIBotVerifySubcommand`、GameTest 类和 restart harness 都位于 `src/gametest`。生产 `src/main` 不注册 `/aibot test` 或 `/aibot verify`，生产 jar 也不应包含这些类。

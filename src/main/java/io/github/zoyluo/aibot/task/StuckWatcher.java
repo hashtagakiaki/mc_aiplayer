@@ -38,7 +38,8 @@ public final class StuckWatcher {
         }
 
         Task task = active.get();
-        Sample current = new Sample(bot.getBlockPos().toImmutable(), task.progress(), inventoryTotal(bot), now);
+        Sample current = new Sample(task, bot.getBlockPos().toImmutable(),
+                task.progress(), inventoryTotal(bot), now);
         Sample previous = samples.get(bot.getUuid());
         if (previous == null || previous.changed(current)) {
             samples.put(bot.getUuid(), current);
@@ -50,8 +51,10 @@ public final class StuckWatcher {
         }
 
         String reason = "stuck:" + task.name();
-        TaskManager.INSTANCE.abort(bot);
-        TaskManager.INSTANCE.recordFailure(bot, task.name(), reason, now);
+        if (TaskManager.INSTANCE.failActive(bot, reason, now).isEmpty()) {
+            samples.remove(bot.getUuid());
+            return;
+        }
         samples.remove(bot.getUuid());
         BotLog.warn(LogCategory.TASK, bot, "task_stuck_aborted",
                 "name", task.name(),
@@ -80,9 +83,10 @@ public final class StuckWatcher {
         return total;
     }
 
-    private record Sample(BlockPos pos, double progress, int inventoryTotal, int sinceTick) {
+    private record Sample(Task task, BlockPos pos, double progress, int inventoryTotal, int sinceTick) {
         private boolean changed(Sample other) {
-            return !pos.equals(other.pos)
+            return task != other.task
+                    || !pos.equals(other.pos)
                     || Math.abs(progress - other.progress) > 0.0001D
                     || inventoryTotal != other.inventoryTotal;
         }

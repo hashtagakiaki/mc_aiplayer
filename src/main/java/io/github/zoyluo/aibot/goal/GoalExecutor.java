@@ -1994,6 +1994,19 @@ public final class GoalExecutor {
         return result != null && result.sequence() > sequence ? Optional.of(result) : Optional.empty();
     }
 
+    /**
+     * A watcher-stopped mission has already exhausted its deterministic recovery path. The
+     * terminal result remains available for reporting, but must not start a fresh model request
+     * that would recreate the same goal with a reset retry budget.
+     */
+    public boolean hasTerminalStuckResult(AIPlayerEntity bot) {
+        GoalResult result = lastResults.get(bot.getUuid());
+        return result != null
+                && result.status() != GoalResult.Status.COMPLETED
+                && result.status() != GoalResult.Status.CANCELLED
+                && isStuckFailure(result.reason());
+    }
+
     public String resultSummary(GoalResult result) {
         return resultMessage(result.status(), result.evaluation(), result.reason());
     }
@@ -3848,7 +3861,8 @@ public final class GoalExecutor {
             if (!fresh.success() && !metadata.transactionOpen()) {
                 finishActive(bot, plan, evaluate(bot, plan),
                         settledTerminalService.isPresent() ? reason
-                                : "replan_failed:" + String.join(",", fresh.unresolved()),
+                                : preserveStuckReason(reason,
+                                "replan_failed:" + String.join(",", fresh.unresolved())),
                         false, true);
                 return;
             }
@@ -3973,8 +3987,8 @@ public final class GoalExecutor {
         if ((!fresh.success() && obsidianRestore.isEmpty()) || replanned.isEmpty()) {
             finishActive(bot, plan, evaluate(bot, plan),
                     settledTerminalService.isPresent() ? reason
-                            : fresh.success() ? "replan_empty"
-                            : "replan_failed:" + String.join(",", fresh.unresolved()),
+                            : preserveStuckReason(reason, fresh.success() ? "replan_empty"
+                            : "replan_failed:" + String.join(",", fresh.unresolved())),
                     false, true);
             return;
         }
@@ -3982,7 +3996,8 @@ public final class GoalExecutor {
         // 重试只会原样再失败一次(实测#9 的 replan 风暴根因)。直接判失败,交大脑/玩家换思路。
         if (plan.current != null && plan.current.equals(replanned.get(0))
                 && isHardFailure(reason) && !madeProgress) {
-            finishActive(bot, plan, evaluate(bot, plan), "replan_same_step:" + reason, false, true);
+            finishActive(bot, plan, evaluate(bot, plan),
+                    preserveStuckReason(reason, "replan_same_step:" + reason), false, true);
             return;
         }
         plan.steps.clear();
@@ -5450,6 +5465,14 @@ public final class GoalExecutor {
                 || reason.contains("stuck:")
                 || reason.contains("timeout")
                 || reason.contains("no_reachable");
+    }
+
+    private static boolean isStuckFailure(String reason) {
+        return reason != null && reason.contains("stuck:");
+    }
+
+    private static String preserveStuckReason(String source, String fallback) {
+        return isStuckFailure(source) ? source : fallback;
     }
 
     // P1:目标失败时给出可执行的中文引导,避免大脑收到原始 reason 后用 move 乱走探索而遇险。

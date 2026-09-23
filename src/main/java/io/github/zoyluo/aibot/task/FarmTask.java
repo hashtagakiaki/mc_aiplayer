@@ -150,8 +150,8 @@ public final class FarmTask extends AbstractTask {
         BlockPos.stream(areaCenter.add(-radius, -1, -radius), areaCenter.add(radius, 1, radius))
                 .map(BlockPos::toImmutable)
                 .filter(pos -> io.github.zoyluo.aibot.mode.ObservableWorldQuery.canObserveBlock(bot, pos)
-                        || io.github.zoyluo.aibot.mode.ObservableWorldQuery.canObserveBlock(bot, pos.up()))
-                .forEach(pos -> addTargetIfUseful(world, pos, hasSeeds));
+                        || io.github.zoyluo.aibot.mode.ObservableWorldQuery.canObserveCell(bot, pos.up()))
+                .forEach(pos -> addTargetIfUseful(bot, world, pos, hasSeeds));
         targets.sort(Comparator.comparingDouble(pos -> pos.ground().getSquaredDistance(bot.getBlockPos())));
         if (targets.isEmpty()) {
             if (!harvestOnly && InventoryAction.countItem(bot, seed) <= 0 && completedActions == 0) {
@@ -180,8 +180,13 @@ public final class FarmTask extends AbstractTask {
         phase = Phase.NEXT;
     }
 
-    private void addTargetIfUseful(ServerWorld world, BlockPos ground, boolean hasSeeds) {
+    private void addTargetIfUseful(AIPlayerEntity bot, ServerWorld world, BlockPos ground, boolean hasSeeds) {
         BlockPos cropPos = ground.up();
+        // The crop state decides whether harvesting or planting is actionable. Do not inspect a
+        // hidden crop cell and infer that it is empty, immature, or harvestable.
+        if (!io.github.zoyluo.aibot.mode.ObservableWorldQuery.canObserveCell(bot, cropPos)) {
+            return;
+        }
         if (world.getBlockState(cropPos).isOf(crop) && FarmAction.isMature(world, cropPos)) {
             targets.add(new FarmTarget(ground, TargetAction.HARVEST));
             return;
@@ -190,6 +195,9 @@ public final class FarmTask extends AbstractTask {
             return;
         }
         if (!hasSeeds) {
+            return;
+        }
+        if (!io.github.zoyluo.aibot.mode.ObservableWorldQuery.canObserveBlock(bot, ground)) {
             return;
         }
         if (world.getBlockState(ground).isOf(Blocks.FARMLAND)) {
@@ -411,17 +419,19 @@ public final class FarmTask extends AbstractTask {
 
     @Override
     public boolean isWaiting() {
-        // 等熟期间 bot 站在田边不动是正常作业(等作物长熟),豁免 StuckWatcher 误杀;卡死交 12000t 配额超时兜底。
-        return (keepTending && phase == Phase.DONE) || waitingForMaturity;
+        // Open-ended tending is intentionally passive. A quota farm may pause only when this
+        // survey actually observed an immature crop; an empty DONE -> SURVEY loop remains under
+        // StuckWatcher's existing no-progress budget.
+        return (keepTending && produceItem == null && phase == Phase.DONE) || waitingForMaturity;
     }
 
-    // 区内是否有"已种但还没熟"的本作物——有就值得留下等熟,别种完就走(治 real_wheat harvest=0)。
+    // 区内是否有可见的"已种但还没熟"的本作物。未观察到的格子保持未知，不能当作没有作物。
     private boolean hasImmatureCrops(AIPlayerEntity bot, ServerWorld world) {
         return BlockPos.stream(areaCenter.add(-radius, -1, -radius), areaCenter.add(radius, 1, radius))
-                .filter(ground -> io.github.zoyluo.aibot.mode.ObservableWorldQuery.canObserveBlock(bot, ground)
-                        || io.github.zoyluo.aibot.mode.ObservableWorldQuery.canObserveBlock(bot, ground.up()))
-                .anyMatch(ground -> {
-                    BlockPos cropPos = ground.up();
+                .map(BlockPos::toImmutable)
+                .map(BlockPos::up)
+                .filter(cropPos -> io.github.zoyluo.aibot.mode.ObservableWorldQuery.canObserveCell(bot, cropPos))
+                .anyMatch(cropPos -> {
                     return world.getBlockState(cropPos).isOf(crop) && !FarmAction.isMature(world, cropPos);
                 });
     }
