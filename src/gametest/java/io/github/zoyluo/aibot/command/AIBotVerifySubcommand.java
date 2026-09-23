@@ -3050,19 +3050,20 @@ public final class AIBotVerifySubcommand {
         GoalExecutor.INSTANCE.clear(bot);
         TaskManager.INSTANCE.abort(bot);
         io.github.zoyluo.aibot.brain.ToolRegistry reg = new io.github.zoyluo.aibot.brain.ToolRegistry();
-        record Case(String tool, String args) {
+        record Case(String tool, String args, String expectedMessage) {
         }
         java.util.List<Case> cases = java.util.List.of(
-                new Case("mine_ore", "{\"ore\":\"minecraft:iron_ore\",\"count\":3}"),
-                new Case("achieve_goal", "{\"item\":\"minecraft:iron_pickaxe\"}"),
-                new Case("harvest_crop", "{\"crop\":\"wheat\"}"),
-                new Case("provision_food", "{\"count\":4}"),
-                new Case("forage", "{}"),
-                new Case("achieve_armor", "{}"),
-                new Case("achieve_workstation", "{}"),
-                new Case("stockpile", "{\"item\":\"minecraft:cobblestone\",\"count\":10}"),
-                new Case("build_house", "{\"width\":7,\"material\":\"stone_like\"}"),
-                new Case("build_house", "{}"));
+                new Case("mine_ore", "{\"ore\":\"minecraft:iron_ore\",\"count\":3}", "goal_assigned"),
+                new Case("achieve_goal", "{\"item\":\"minecraft:iron_pickaxe\"}", "goal_assigned"),
+                new Case("harvest_crop", "{\"crop\":\"wheat\"}", "goal_assigned"),
+                new Case("provision_food", "{\"count\":4}", "goal_assigned"),
+                new Case("forage", "{\"item\":\"minecraft:sweet_berries\"}", "goal_assigned"),
+                new Case("assign_task", "{\"task_type\":\"forage\",\"params\":{\"item\":\"minecraft:wheat_seeds\",\"count\":30}}", "assigned: gather"),
+                new Case("achieve_armor", "{}", "goal_assigned"),
+                new Case("achieve_workstation", "{}", "goal_assigned"),
+                new Case("stockpile", "{\"item\":\"minecraft:cobblestone\",\"count\":10}", "goal_assigned"),
+                new Case("build_house", "{\"width\":7,\"material\":\"stone_like\"}", "goal_assigned"),
+                new Case("build_house", "{}", "goal_assigned"));
         StringBuilder fails = new StringBuilder();
         int ok = 0;
         for (Case c : cases) {
@@ -3081,13 +3082,25 @@ public final class AIBotVerifySubcommand {
                 TaskManager.INSTANCE.abort(bot);
                 continue;
             }
-            if (r != null && r.ok() && r.message() != null && r.message().contains("goal_assigned")) {
-                ok++;
+            if (r != null && r.ok() && r.message() != null && r.message().contains(c.expectedMessage())) {
+                if (c.tool().equals("assign_task")
+                        && !TaskManager.INSTANCE.status(bot).description().contains("minecraft:wheat_seeds")) {
+                    fails.append("assign_task:forage_target_changed=")
+                            .append(TaskManager.INSTANCE.status(bot).description()).append("; ");
+                } else {
+                    ok++;
+                }
             } else {
                 fails.append(c.tool()).append("=").append(r == null ? "null" : r.message()).append("; ");
             }
             GoalExecutor.INSTANCE.clear(bot); // 只测接线:清掉刚提交的目标,不实际执行
             TaskManager.INSTANCE.abort(bot);
+        }
+        try {
+            reg.get("forage").orElseThrow().handler().invoke(bot, new com.google.gson.JsonObject());
+            fails.append("forage:missing_item_accepted; ");
+        } catch (IllegalArgumentException expected) {
+            // An omitted target must fail instead of silently selecting a different item.
         }
         return fails.length() == 0
                 ? Result.pass("tool_dispatch", ok + "/" + cases.size() + " 高层工具→Goal 接线/参数映射全通")

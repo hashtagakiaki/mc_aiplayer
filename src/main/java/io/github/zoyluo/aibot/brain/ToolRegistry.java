@@ -331,13 +331,15 @@ public final class ToolRegistry {
             return started ? ok("goal_assigned: provision_food") : fail("goal_plan_failed");
         });
 
-        register("forage", "Forage SPECIFIC wild berries/melon nearby. ONLY when the user EXPLICITLY asks for berries/wild fruit, NOT for general food. "
-                + "Use for 采点野果/采点浆果/摘浆果/采甜浆果/摘西瓜/想吃浆果; needs berry bushes or melons around. "
+        register("forage", "Forage the explicitly requested wild food item nearby. ONLY when the user EXPLICITLY asks for berries/wild fruit, NOT for general food. "
+                + "Use for 采点野果/采点浆果/摘浆果/采甜浆果/摘西瓜/想吃浆果; specify item (for example minecraft:sweet_berries or minecraft:melon_slice). "
                 + "For ANY general 找吃的/搞点吃的 request use provision_food instead (it auto-picks hunt or farm). count = how many (default 4).", objectSchema()
+                .property("item", stringSchema("required target item id, for example minecraft:sweet_berries or minecraft:melon_slice"))
                 .property("count", integerSchema("how many wild food to gather (default 4)"))
+                .required("item")
                 .build(), (bot, args) -> {
             boolean started = GoalExecutor.INSTANCE.submit(bot,
-                    new Goal.HaveItem(net.minecraft.item.Items.SWEET_BERRIES, optionalInt(args, "count", 4)));
+                    new Goal.HaveItem(requiredItem(args, "item"), optionalInt(args, "count", 4)));
             return started ? ok("goal_assigned: forage") : fail("goal_plan_failed");
         });
 
@@ -771,8 +773,8 @@ public final class ToolRegistry {
         register("goal_status", "Get the current persistent long-term goal status", objectSchema().build(), ToolDefinition.Group.MEMORY, (bot, args) ->
                 ok(BotMemoryStore.INSTANCE.of(bot.getUuid()).goalStatus("")));
 
-        register("assign_task", "Start a high-level deterministic task for the bot. Prefer this for movement, gathering, foraging, mining, combat, building, sleep, lighting, farming, fishing, trading, breeding, and container work. Use dedicated craft, eat, and smelt tools for those actions. For exposed surface blocks use task_type=mine. To obtain ores (iron/coal/copper/gold/diamond, *_ore, or raw_*), use the dedicated mine_ore tool which auto-locates the nearest ore and mines it directly. Legacy strip_mine and mine_vein routes are operator-only and are rejected in strict_survival. Supersedes any current task. Build params: blueprint plus optional anchor_x/anchor_y/anchor_z, auto_site, and flatten. x/y/z aliases are accepted; omit anchor when auto_site=true.", objectSchema()
-                .property("task_type", stringSchema("move, gather, forage, irrigate, milk_cow, raid_crops, attack, mine, build, sleep, light_area, farm, harvest, fish, trade, breed, follow, hold, guard, deposit, stockpile, or withdraw; legacy operator-only: strip_mine, mine_vein"))
+        register("assign_task", "Start a high-level deterministic task for the bot. Prefer this for movement, gathering, foraging, mining, combat, building, sleep, lighting, farming, fishing, trading, breeding, and container work. Use dedicated craft, eat, and smelt tools for those actions. For exposed surface blocks use task_type=mine. To obtain ores (iron/coal/copper/gold/diamond, *_ore, or raw_*), use the dedicated mine_ore tool which auto-locates the nearest ore and mines it directly. Legacy strip_mine and mine_vein routes are operator-only and are rejected in strict_survival. Supersedes any current task. For task_type=forage, params.item is required. Build params: blueprint plus optional anchor_x/anchor_y/anchor_z, auto_site, and flatten. x/y/z aliases are accepted; omit anchor when auto_site=true.", objectSchema()
+                .property("task_type", stringSchema("move, gather, forage (requires params.item), irrigate, milk_cow, raid_crops, attack, mine, build, sleep, light_area, farm, harvest, fish, trade, breed, follow, hold, guard, deposit, stockpile, or withdraw; legacy operator-only: strip_mine, mine_vein"))
                 .property("params", objectSchema().build())
                 .required("task_type")
                 .required("params")
@@ -837,7 +839,7 @@ public final class ToolRegistry {
         }
         return switch (taskType) {
             case "move" -> new MoveTask(bot, new BlockPos(requiredInt(params, "x"), requiredInt(params, "y"), requiredInt(params, "z")));
-            case "forage" -> new GatherQuotaTask(net.minecraft.item.Items.SWEET_BERRIES, optionalInt(params, "count", 4));
+            case "forage" -> new GatherQuotaTask(requiredItem(params, "item"), optionalInt(params, "count", 4));
             case "attack" -> new CombatTask(
                     requiredEntityType(params, "entity_type"),
                     optionalInt(params, "count", 1),
