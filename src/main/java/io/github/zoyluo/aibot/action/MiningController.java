@@ -18,6 +18,7 @@ public final class MiningController {
     private final BlockPos pos;
     private final Direction face;
     private boolean started;
+    private boolean stopSent;
     private BlockState targetState;
     private float progress;
     private int elapsed;
@@ -33,6 +34,7 @@ public final class MiningController {
         BlockState state = world.getBlockState(pos);
         if (state.isAir()) {
             resetProgress(player);
+            AStarPathfinder.invalidateCache("block_break");
             return ActionResult.SUCCESS;
         }
         if (targetState != null && !state.equals(targetState)) {
@@ -44,6 +46,19 @@ public final class MiningController {
         if (player.getEyePos().distanceTo(pos.toCenterPos()) > reach + 0.5D) {
             abort(player);
             return ActionResult.failed("out_of_reach");
+        }
+
+        // STOP can arrive just before ServerPlayerInteractionManager has advanced its own
+        // break progress for this server tick. In that case vanilla defers the physical break
+        // to update(); keep this action alive until the world confirms air instead of reporting
+        // success and letting BlockMiner immediately restart on the still-solid same block.
+        if (stopSent) {
+            elapsed++;
+            if (elapsed > MAX_TICKS) {
+                abort(player);
+                return ActionResult.failed("break_not_committed");
+            }
+            return ActionResult.IN_PROGRESS;
         }
 
         if (!started) {
@@ -73,8 +88,12 @@ public final class MiningController {
                     World.MAX_Y,
                     -1);
             world.setBlockBreakingInfo(player.getId(), pos, -1);
-            AStarPathfinder.invalidateCache("block_break");
-            return ActionResult.SUCCESS;
+            if (world.getBlockState(pos).isAir()) {
+                AStarPathfinder.invalidateCache("block_break");
+                return ActionResult.SUCCESS;
+            }
+            stopSent = true;
+            return ActionResult.IN_PROGRESS;
         }
 
         elapsed++;
@@ -97,6 +116,7 @@ public final class MiningController {
                 -1);
         player.getServerWorld().setBlockBreakingInfo(player.getId(), pos, -1);
         started = false;
+        stopSent = false;
         targetState = null;
         progress = 0.0F;
         elapsed = 0;
@@ -113,6 +133,7 @@ public final class MiningController {
         }
         player.getServerWorld().setBlockBreakingInfo(player.getId(), pos, -1);
         started = false;
+        stopSent = false;
         targetState = null;
         progress = 0.0F;
         elapsed = 0;

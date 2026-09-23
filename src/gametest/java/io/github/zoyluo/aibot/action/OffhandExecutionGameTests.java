@@ -15,6 +15,7 @@ import net.minecraft.test.GameTest;
 import net.minecraft.test.TestContext;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
+import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.GameMode;
 
@@ -24,6 +25,36 @@ import java.util.Set;
 /** Strict-survival proofs that executable inventory paths honor offhand resources. */
 public final class OffhandExecutionGameTests implements FabricGameTest {
     private static final String BATCH = "offhandExecutionStrict";
+
+    @GameTest(templateName = FabricGameTest.EMPTY_STRUCTURE,
+            batchId = BATCH, tickLimit = 80)
+    public void miningWaitsForVanillaBreakCommit(TestContext context) {
+        Fixture fixture = spawn(context, "MiningCommitSettleGT", new BlockPos(7, 4, 7));
+        AIPlayerEntity bot = fixture.bot();
+        BlockPos target = fixture.feet().north();
+        context.getWorld().setBlockState(
+                target, Blocks.COBBLESTONE.getDefaultState(), Block.NOTIFY_ALL);
+        InventoryAction.giveItem(bot, new ItemStack(Items.STONE_PICKAXE));
+
+        bot.getActionPack().startMining(target, Direction.NORTH);
+        // Replay the action controller faster than server ticks so STOP precedes vanilla's
+        // internal mining clock. Vanilla should finish the deferred break on real updates.
+        for (int i = 0; i < 24; i++) {
+            bot.getActionPack().onUpdate();
+        }
+        require(context, context.getWorld().getBlockState(target).isOf(Blocks.COBBLESTONE)
+                        && !bot.getActionPack().isMiningIdle(),
+                "mining reported complete before vanilla committed the block break");
+
+        context.runAtEveryTick(() -> {
+            if (!context.getWorld().getBlockState(target).isAir()) {
+                return;
+            }
+            require(context, bot.getActionPack().isMiningIdle(),
+                    "physical block break committed while the controller remained active");
+            cleanup(context, fixture);
+        });
+    }
 
     @GameTest(templateName = FabricGameTest.EMPTY_STRUCTURE,
             batchId = BATCH, tickLimit = 260)
