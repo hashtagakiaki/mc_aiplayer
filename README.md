@@ -70,6 +70,8 @@ Runtime control supports cancel/replace and nested pause/resume. Bot, mission, c
 
 Finite tasks are monitored by a configured no-progress window. A task can pause that monitor only while it has a concrete wait condition, such as an observed immature crop, or when the command is intentionally ongoing. If a task stalls, the task manager settles it with one shared failure reason; the goal executor then uses its existing bounded deterministic replanning. A terminal no-progress result is reported without asking the model to recreate the failed work. See [Testing and evidence](docs/TESTING_AND_EVIDENCE.md) for the verification boundary.
 
+When a fresh plan proves that a bot below the surface needs a surface-only dependency, strict survival inserts one bounded `RETURN_TO_SURFACE` task. It physically climbs to a verified reusable dry exit, then replans the original goal from the live state. Other failures keep the existing bounded replanning path. This is limited context recovery, not a guarantee that every resource or route can be recovered, and it does not use privileged teleport or hidden-world access. The implementation is source-verified only; it is not deployed or runtime-verified.
+
 ## Current verification status
 
 The repository separates source-level checks, world-backed tests, diagnostic evidence, and release evidence:

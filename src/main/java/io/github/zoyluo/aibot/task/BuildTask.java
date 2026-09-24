@@ -291,6 +291,14 @@ public final class BuildTask extends AbstractTask {
         if (block == null) {
             return;
         }
+        // Gathering a build's materials can leave the bot well outside the blueprint's local
+        // work-pose search radius. In strict survival every candidate near the distant anchor is
+        // then correctly unobservable, so nearbyStand returns null and the old code spent its
+        // per-block budget skipping the whole structure in place. Approach the site in short,
+        // visible, standable waypoints before starting that per-block timeout.
+        if (approachBuildSite(bot)) {
+            return;
+        }
         // 落块格预算(镜像 flatten 50t skip):同一块连续放不到时先记录并继续其余结构，避免单格把
         // 整个执行器卡到 build_timeout。末尾按完整 blueprint（包括 AIR）核验世界状态；只有 exact
         // match 才完成，否则以 structure_incomplete 失败，不能把 best-effort 误报为完工。
@@ -533,6 +541,48 @@ public final class BuildTask extends AbstractTask {
             }
         }
         return best;
+    }
+
+    private boolean approachBuildSite(AIPlayerEntity bot) {
+        if (anchor == null) {
+            return false;
+        }
+        BlockPos current = bot.getBlockPos();
+        double dx = anchor.getX() - current.getX();
+        double dz = anchor.getZ() - current.getZ();
+        double distance = Math.hypot(dx, dz);
+        int perceptionRadius = Math.max(1, io.github.zoyluo.aibot.AIBotConfig.get().perception().radius());
+        double standoff = Math.max(1.0D, perceptionRadius - 5.0D);
+        if (distance <= standoff) {
+            return false;
+        }
+        if (!bot.getActionPack().isPathExecutorIdle()) {
+            return true;
+        }
+
+        double step = Math.min(8.0D, distance - standoff + 1.0D);
+        BlockPos waypoint = new BlockPos(
+                (int) Math.floor(current.getX() + dx / distance * step + 0.5D),
+                current.getY(),
+                (int) Math.floor(current.getZ() + dz / distance * step + 0.5D));
+        // Use normal navigation to resolve the waypoint to traversable terrain. A local-only
+        // stand search can reject every step in dense canopy even though A* has a safe surface
+        // route; the bot still walks there physically and receives no hidden block data in its
+        // model context.
+        ActionResult path = bot.getActionPack().startSurfacePathTo(waypoint);
+        if (path.isFailed()) {
+            placeDelayTicks = 4;
+            if ("pathfinding_throttled".equals(path.reason())) return true;
+            retryTicks++;
+            if (retryTicks > 12) {
+                fail("approach_path_to_build_site_failed: " + path.reason());
+            }
+        } else {
+            retryTicks = 0;
+            BotLog.action(bot, "build_site_approach_started",
+                    "from", compact(current), "waypoint", compact(waypoint), "anchor", compact(anchor));
+        }
+        return true;
     }
 
     /**

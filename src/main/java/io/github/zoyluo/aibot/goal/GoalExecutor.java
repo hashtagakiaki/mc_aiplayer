@@ -596,7 +596,8 @@ public final class GoalExecutor {
                 || restore.taskCheckpointKind() == GoalStep.Kind.MINING_SERVICE
                 || restore.taskCheckpointKind() == GoalStep.Kind.MINE_ORE
                 || restore.taskCheckpointKind() == GoalStep.Kind.MINE
-                || restore.taskCheckpointKind() == GoalStep.Kind.DESCEND_TO_Y;
+                || restore.taskCheckpointKind() == GoalStep.Kind.DESCEND_TO_Y
+                || restore.taskCheckpointKind() == GoalStep.Kind.RETURN_TO_SURFACE;
         if (!validCapacityParentMarkers || restoredCapacityParent != null
                 && (!validCapacityParentRetry(restoredCapacityParentMetadata)
                 && !restoredCommittedCapacityParent
@@ -1177,6 +1178,14 @@ public final class GoalExecutor {
                 && !freshObsidianIdentityPresent
                 && directObsidianRemainingTarget == restoredObsidianRemainingTarget;
         boolean interruptedDigDown = restoredDigDown.isPresent();
+        boolean restoringSurfaceRecovery = restore != null
+                && restore.taskCheckpointKind() == GoalStep.Kind.RETURN_TO_SURFACE;
+        boolean surfaceRecoveryAdmission = !unsettledHuntPickup
+                && interruptedServiceOres.isEmpty()
+                && !committedPreflight && !interruptedObsidian
+                && !interruptedDigDown && !interruptedDescend
+                && !restoredOreDigPhysicalDebt
+                && (restoringSurfaceRecovery || GoalPlanner.needsSurfaceRecovery(bot, plan));
         // A direct obsidian goal can be reconstructed from its exact transaction alone. A compound
         // goal cannot: its fresh plan owns unrelated material and terminal steps (notably BUILD).
         // When that plan failed, replaying only service -> MAKE would mutate the world and then lose
@@ -1207,7 +1216,7 @@ public final class GoalExecutor {
                     restoredSkippedResults);
             return false;
         }
-        if (!plan.success() && !unsettledHuntPickup && interruptedServiceOres.isEmpty()
+        if (!plan.success() && !surfaceRecoveryAdmission && !unsettledHuntPickup && interruptedServiceOres.isEmpty()
                 && !committedPreflight && !interruptedObsidian
                 && !interruptedDigDown && !interruptedDescend
                 && !restoredOreDigPhysicalDebt) {
@@ -1228,7 +1237,10 @@ public final class GoalExecutor {
             return false;
         }
         List<GoalStep> restoredSteps;
-        if (unsettledHuntPickup) {
+        if (surfaceRecoveryAdmission) {
+            restoredSteps = new ArrayList<>(List.of(GoalStep.returnToSurface(
+                    GoalPlanner.surfaceRecoveryAnchor(bot, context.origin()))));
+        } else if (unsettledHuntPickup) {
             HuntPickupCheckpoint.Metadata metadata = restoredHunt.orElseThrow();
             GoalStep settlement = GoalStep.hunt(metadata.targetCount());
             if (!metadata.requireFullQuota()) {
@@ -1682,6 +1694,12 @@ public final class GoalExecutor {
             }
             clearCompletedTaskCheckpoint(plan);
             plan.completedSteps++; // Phase A:完成一步=进展信号
+            if (plan.current.kind() == GoalStep.Kind.RETURN_TO_SURFACE) {
+                plan.current = null;
+                plan.currentTask = null;
+                resumeAfterSurfaceRecovery(bot, plan);
+                return true;
+            }
             GoalEvaluation completedEvaluation = evaluate(bot, plan);
             if (completedEvaluation.state() == GoalEvaluation.State.SATISFIED) {
                 finishActive(bot, plan, completedEvaluation,
@@ -1705,6 +1723,41 @@ public final class GoalExecutor {
         // GOALFIX-GF1 P0-B:其它状态(如上一任务残留的 lastStatus)→ 防御性 no-op,
         // 步骤推进只由 COMPLETED 分支驱动,失败由 FAILED 分支驱动。
         return true;
+    }
+
+    /**
+     * A surface return only changes the planning context. Replan the original mission from the
+     * factual exit before dispatching any dependency, so a deep GATHER cannot survive the barrier
+     * as a stale step and a false exit cannot silently continue a surface-only chain.
+     */
+    private void resumeAfterSurfaceRecovery(AIPlayerEntity bot, ActivePlan plan) {
+        if (!GoalPlanner.canAcquireSurfaceResources(bot)) {
+            finishActive(bot, plan, evaluate(bot, plan),
+                    "surface_recovery_replan_failed:not_at_surface", false, true);
+            return;
+        }
+        GoalPlanner.GoalPlan fresh = GoalPlanner.plan(
+                bot, plan.goal, snapshotContext(plan), plan.missionId.toString());
+        List<GoalStep> continuation = applySkippedTargetReceipts(
+                fresh.success() ? fresh.steps() : List.of(), plan.skippedTargetReceipts);
+        String failure = !fresh.success()
+                ? "replan_failed:" + String.join(",", fresh.unresolved())
+                : GoalPlanner.needsSurfaceRecovery(bot, fresh)
+                ? "surface_dependency_still_unavailable"
+                : continuation.isEmpty() ? "replan_empty" : "";
+        if (!failure.isEmpty()) {
+            finishActive(bot, plan, evaluate(bot, plan),
+                    "surface_recovery_replan_failed:" + failure, false, true);
+            return;
+        }
+        plan.steps.clear();
+        plan.steps.addAll(continuation);
+        plan.totalSteps = continuation.size();
+        BotLog.task(bot, "goal_surface_recovery_replanned",
+                "goal", plan.goal,
+                "steps", continuation.stream().map(GoalStep::describe).toList());
+        report(bot, "地上に戻ったので、現在の状況から続きの手順を組み直します。");
+        captureTransitionAndAssignNext(bot, plan);
     }
 
     private void settleRestoredHuntPickup(AIPlayerEntity bot, ActivePlan plan) {
@@ -3851,6 +3904,7 @@ public final class GoalExecutor {
         plan.lifetimeReplans++;
         GoalPlanner.GoalPlan fresh = GoalPlanner.plan(
                 bot, plan.goal, snapshotContext(plan), plan.missionId.toString());
+        boolean surfaceRecovery = GoalPlanner.needsSurfaceRecovery(bot, fresh);
         Optional<CreateObsidianTask.RestoreMetadata> obsidianRestore =
                 CreateObsidianTask.inspectCheckpoint(plan.obsidianCheckpoint);
         List<GoalStep> replanned = new ArrayList<>(applySkippedTargetReceipts(
@@ -3858,7 +3912,7 @@ public final class GoalExecutor {
                 plan.skippedTargetReceipts));
         if (obsidianRestore.isPresent()) {
             CreateObsidianTask.RestoreMetadata metadata = obsidianRestore.get();
-            if (!fresh.success() && !metadata.transactionOpen()) {
+            if (!fresh.success() && !metadata.transactionOpen() && !surfaceRecovery) {
                 finishActive(bot, plan, evaluate(bot, plan),
                         settledTerminalService.isPresent() ? reason
                                 : preserveStuckReason(reason,
@@ -3981,10 +4035,19 @@ public final class GoalExecutor {
                 }
             }
         }
+        if (surfaceRecovery) {
+            replanned.clear();
+            replanned.add(GoalStep.returnToSurface(
+                    GoalPlanner.surfaceRecoveryAnchor(bot, plan.origin)));
+            BotLog.task(bot, "goal_surface_recovery_scheduled",
+                    "goal", plan.goal,
+                    "reason", reason,
+                    "unresolved", fresh.unresolved());
+        }
         BotLog.task(bot, "goal_replan", "goal", plan.goal, "reason", reason,
                 "steps", replanned.stream().map(GoalStep::describe).toList(),
                 "unresolved", fresh.unresolved());
-        if ((!fresh.success() && obsidianRestore.isEmpty()) || replanned.isEmpty()) {
+        if ((!fresh.success() && obsidianRestore.isEmpty() && !surfaceRecovery) || replanned.isEmpty()) {
             finishActive(bot, plan, evaluate(bot, plan),
                     settledTerminalService.isPresent() ? reason
                             : preserveStuckReason(reason, fresh.success() ? "replan_empty"
@@ -4642,6 +4705,9 @@ public final class GoalExecutor {
                     step.pos().getY(), plan.takeTaskCheckpoint(GoalStep.Kind.DESCEND_TO_Y)));
             case ACQUIRE_WATER -> Optional.of(new io.github.zoyluo.aibot.task.AcquireWaterTask(
                     plan.origin, plan.peekTaskCheckpoint(GoalStep.Kind.ACQUIRE_WATER)));
+            case RETURN_TO_SURFACE -> Optional.of(
+                    io.github.zoyluo.aibot.task.AcquireWaterTask.returnToSurface(
+                            step.pos(), plan.peekTaskCheckpoint(GoalStep.Kind.RETURN_TO_SURFACE)));
             case MAKE_OBSIDIAN -> Optional.of(new CreateObsidianTask(
                     step.count(), plan.checkpointForObsidian()));
             // 盖房:BUILD 步 → BuildTask(自动选址 autoSite + 整地 flatten,真实起伏地形也能落成);材料已由规划期备齐;

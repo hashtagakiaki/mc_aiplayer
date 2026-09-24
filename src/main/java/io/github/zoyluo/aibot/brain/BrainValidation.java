@@ -13,6 +13,7 @@ public final class BrainValidation {
     public static ValidationResult apiFailure(AIPlayerEntity bot) {
         AIBotConfig.DeepSeek current = AIBotConfig.get().deepseek();
         AIBotConfig.DeepSeek invalid = new AIBotConfig.DeepSeek(
+                "deepseek",
                 "",
                 current.baseUrl(),
                 current.model(),

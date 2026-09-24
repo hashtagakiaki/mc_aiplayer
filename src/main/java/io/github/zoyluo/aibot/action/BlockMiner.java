@@ -83,6 +83,13 @@ public final class BlockMiner {
             target = null;
             return Status.DONE;
         }
+        if (!world.canPlayerModifyAt(bot, target)) {
+            bot.getActionPack().stopMining();
+            failureReason = "world_restricted";
+            target = null;
+            started = false;
+            return Status.FAILED;
+        }
         // 流体不可"破坏"(挖击进度永不完成):调用方用 !isAir 判固体把水当成了可挖目标,
         // 每块干耗满 200t 超时再被拉黑(实测 miner_slow_dump block=water、13 连黑)。立即失败换块。
         if (!targetState.getFluidState().isEmpty()) {

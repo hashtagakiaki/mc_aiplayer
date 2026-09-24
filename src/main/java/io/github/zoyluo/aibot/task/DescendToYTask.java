@@ -547,7 +547,19 @@ public final class DescendToYTask extends AbstractTask implements Checkpointable
                 return;
             }
             miner.begin(bot, solid);
-            miner.tick(bot);
+            BlockMiner.Status miningStatus = miner.tick(bot);
+            if (miningStatus == BlockMiner.Status.FAILED) {
+                String reason = miner.failureReason();
+                miner.cancel(bot);
+                bot.getActionPack().stopAll();
+                fail("descend_mine_failed at=" + solid.toShortString() + " reason=" + reason);
+                BotLog.danger(bot, "descend_mine_failed",
+                        "at", solid.toShortString(), "reason", reason);
+                return;
+            }
+            if (miningStatus == BlockMiner.Status.DONE) {
+                lastProgressTick = totalBudget();
+            }
             markStarted(bot, feet);
             return;
         }

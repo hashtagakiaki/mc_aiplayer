@@ -62,6 +62,12 @@ public final class MiningController {
         }
 
         if (!started) {
+            if (!world.canPlayerModifyAt(player, pos)) {
+                BotLog.action(player, "mine_rejected",
+                        "reason", "world_restricted",
+                        "pos", LogFields.pos(pos));
+                return ActionResult.failed("world_restricted");
+            }
             ToolSelector.equipBestTool(player, state);
             BotLog.action(player, "mine_start", "pos", LogFields.pos(pos), "face", face);
             player.interactionManager.processBlockBreakingAction(

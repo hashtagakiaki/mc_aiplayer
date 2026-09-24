@@ -83,6 +83,17 @@ public final class AcquireWaterTask extends AbstractTask implements Checkpointab
         DONE
     }
 
+    /**
+     * RETURN_TO_SURFACE deliberately reuses the physical ascent controller below, but never
+     * acquires or searches for water.  Keeping this as task-local state instead of a second task
+     * prevents recovery from gaining a weaker movement or mining path than the expedition uses.
+     */
+    private enum Mode {
+        ACQUIRE_WATER,
+        RETURN_TO_SURFACE
+    }
+
+    private final Mode mode;
     private final BlockPos requestedSurfaceAnchor;
     private final SearchCheckpoint restored;
     private final boolean invalidCheckpoint;
@@ -133,25 +144,48 @@ public final class AcquireWaterTask extends AbstractTask implements Checkpointab
     private BlockPos pausedAscentPosition;
 
     public AcquireWaterTask(BlockPos surfaceAnchor) {
-        this(surfaceAnchor, Map.of());
+        this(surfaceAnchor, Map.of(), Mode.ACQUIRE_WATER);
     }
 
     public AcquireWaterTask(BlockPos surfaceAnchor, Map<String, String> checkpoint) {
+        this(surfaceAnchor, checkpoint, Mode.ACQUIRE_WATER);
+    }
+
+    /** Creates a bounded, strict-survival return to the nearest reusable dry surface exit. */
+    public static AcquireWaterTask returnToSurface(BlockPos surfaceAnchor) {
+        return new AcquireWaterTask(surfaceAnchor, Map.of(), Mode.RETURN_TO_SURFACE);
+    }
+
+    /** Restores a return-only task from a checkpoint owned by RETURN_TO_SURFACE. */
+    public static AcquireWaterTask returnToSurface(BlockPos surfaceAnchor,
+                                                   Map<String, String> checkpoint) {
+        return new AcquireWaterTask(surfaceAnchor, checkpoint, Mode.RETURN_TO_SURFACE);
+    }
+
+    private AcquireWaterTask(BlockPos surfaceAnchor, Map<String, String> checkpoint, Mode mode) {
+        this.mode = mode;
         this.requestedSurfaceAnchor = surfaceAnchor == null ? BlockPos.ORIGIN : surfaceAnchor.toImmutable();
         Map<String, String> values = checkpoint == null ? Map.of() : checkpoint;
         this.restored = SearchCheckpoint.decode(values).orElse(null);
+        // Existing water checkpoints deliberately remain schema-compatible, including unknown
+        // extension keys. Return-only checkpoints, however, must attest their task kind and can
+        // only ever resume the physical RETURN_SURFACE phase.
+        boolean modeMatches = mode == Mode.ACQUIRE_WATER
+                || Mode.RETURN_TO_SURFACE.name().equals(values.get("mode"))
+                && restored != null && restored.phase() == Phase.RETURN_SURFACE;
         this.invalidCheckpoint = !values.isEmpty()
-                && (restored == null || !restored.surfaceAnchor().equals(this.requestedSurfaceAnchor));
+                && (restored == null || !restored.surfaceAnchor().equals(this.requestedSurfaceAnchor)
+                || !modeMatches);
     }
 
     @Override
     public String name() {
-        return "acquire_water";
+        return mode == Mode.RETURN_TO_SURFACE ? "return_to_surface" : "acquire_water";
     }
 
     @Override
     public String describe() {
-        return "AcquireWater phase=" + phase
+        return (mode == Mode.RETURN_TO_SURFACE ? "ReturnToSurface" : "AcquireWater") + " phase=" + phase
                 + " observed=" + reachedWaypoints
                 + " attempted=" + issuedWaypoints + "/" + waypointLimit;
     }
@@ -212,7 +246,7 @@ public final class AcquireWaterTask extends AbstractTask implements Checkpointab
             consecutiveUnreachableWaypoints = restored.consecutiveUnreachableWaypoints();
             unreachableAnchor = restored.unreachableAnchor();
             rejectedSources.addAll(restored.rejectedSources());
-            BotLog.task(bot, "acquire_water_restored",
+            BotLog.task(bot, eventName("restored"),
                     "phase", phase,
                     "observed", reachedWaypoints,
                     "attempted", issuedWaypoints,
@@ -221,17 +255,19 @@ public final class AcquireWaterTask extends AbstractTask implements Checkpointab
                     "budget_limit", elapsedLimit,
                     "anchor", surfaceAnchor.toShortString());
         }
-        if (InventoryAction.countItem(bot, Items.WATER_BUCKET) > 0) {
-            finish(bot);
-            return;
-        }
-        if (InventoryAction.countItem(bot, Items.BUCKET) <= 0) {
-            fail("acquire_water_missing_bucket");
-            return;
-        }
-        if (phase == Phase.DONE) {
-            fail("acquire_water_checkpoint_done_without_water");
-            return;
+        if (mode == Mode.ACQUIRE_WATER) {
+            if (InventoryAction.countItem(bot, Items.WATER_BUCKET) > 0) {
+                finish(bot);
+                return;
+            }
+            if (InventoryAction.countItem(bot, Items.BUCKET) <= 0) {
+                fail("acquire_water_missing_bucket");
+                return;
+            }
+            if (phase == Phase.DONE) {
+                fail("acquire_water_checkpoint_done_without_water");
+                return;
+            }
         }
         // Each checkpoint carries the authority ceiling under which it was issued.  A schema-2/3
         // terminal therefore keeps its historical 100/12,000 boundary after migration instead of
@@ -256,7 +292,7 @@ public final class AcquireWaterTask extends AbstractTask implements Checkpointab
 
     @Override
     protected void onAbort(AIPlayerEntity bot) {
-        clearReturnSurfaceWork(bot, "acquire_water_aborted");
+        clearReturnSurfaceWork(bot, eventName("aborted"));
     }
 
     @Override
@@ -329,7 +365,7 @@ public final class AcquireWaterTask extends AbstractTask implements Checkpointab
             failedAscentRelocations.clear();
             pathAttempts = 0;
             noteAscentProgress();
-            BotLog.action(bot, "acquire_water_ascent_relocated",
+            BotLog.action(bot, eventName("ascent_relocated"),
                     "to", reached.toShortString(),
                     "used", ascentRelocationsAtLevel,
                     "budget", MAX_ASCENT_RELOCATIONS_PER_LEVEL,
@@ -376,13 +412,15 @@ public final class AcquireWaterTask extends AbstractTask implements Checkpointab
             fail(timeoutReason());
             return;
         }
-        if (InventoryAction.countItem(bot, Items.WATER_BUCKET) > 0) {
-            finish(bot);
-            return;
-        }
-        if (InventoryAction.countItem(bot, Items.BUCKET) <= 0) {
-            fail("acquire_water_bucket_lost");
-            return;
+        if (mode == Mode.ACQUIRE_WATER) {
+            if (InventoryAction.countItem(bot, Items.WATER_BUCKET) > 0) {
+                finish(bot);
+                return;
+            }
+            if (InventoryAction.countItem(bot, Items.BUCKET) <= 0) {
+                fail("acquire_water_bucket_lost");
+                return;
+            }
         }
         switch (phase) {
             case RETURN_SURFACE -> returnToSurface(bot);
@@ -415,7 +453,7 @@ public final class AcquireWaterTask extends AbstractTask implements Checkpointab
         // Keep this as an immediate vanilla interaction rather than publishing APPROACH state:
         // failure leaves every RETURN_SURFACE budget/ledger untouched, while success is durable in
         // the inventory and can therefore finish synchronously without a checkpoint schema bump.
-        if (fillReachableReturnWater(bot)) {
+        if (mode == Mode.ACQUIRE_WATER && fillReachableReturnWater(bot)) {
             return;
         }
         // The old surface anchor is not a mandatory doorway. A deep staircase may emerge tens of
@@ -426,6 +464,10 @@ public final class AcquireWaterTask extends AbstractTask implements Checkpointab
         // SEARCH/APPROACH checkpoint inside the same durable invariant.
         BlockPos reusableSearchOrigin = reusableSurfaceSearchOrigin(bot);
         if (reusableSearchOrigin != null) {
+            if (mode == Mode.RETURN_TO_SURFACE) {
+                finishSurfaceReturn(bot, reusableSearchOrigin);
+                return;
+            }
             beginSurfaceSearch(bot, reusableSearchOrigin);
             return;
         }
@@ -553,6 +595,20 @@ public final class AcquireWaterTask extends AbstractTask implements Checkpointab
                 "anchor", surfaceAnchor.toShortString());
     }
 
+    private void finishSurfaceReturn(AIPlayerEntity bot, BlockPos exit) {
+        // The identical dry-exit proof used by water search is the return task postcondition.
+        // Mark the durable latch before completion so a task snapshot always describes a factual
+        // exit, while a restored DONE phase remains invalid for this return-only mode.
+        clearReturnSurfaceWork(bot, "return_to_surface_completed");
+        surfaceExitReached = true;
+        searchOrigin = exit.toImmutable();
+        phase = Phase.DONE;
+        BotLog.action(bot, eventName("completed"),
+                "at", exit.toShortString(),
+                "anchor", surfaceAnchor.toShortString());
+        complete();
+    }
+
     private static boolean hasReusableSurfaceEgress(AIPlayerEntity bot,
                                                      ServerWorld world,
                                                      BlockPos current,
@@ -625,7 +681,7 @@ public final class AcquireWaterTask extends AbstractTask implements Checkpointab
                 return false;
             }
             bot.getActionPack().stopAll();
-            BotLog.action(bot, "acquire_water_ascent_step",
+            BotLog.action(bot, eventName("ascent_step"),
                     "from", current.toShortString(), "to", ascentTarget.toShortString());
         }
 
@@ -679,7 +735,7 @@ public final class AcquireWaterTask extends AbstractTask implements Checkpointab
             }
             BlockMiner.Status status = returnMiner.tick(bot);
             if (status == BlockMiner.Status.FAILED) {
-                BotLog.action(bot, "acquire_water_ascent_mine_failed",
+                BotLog.action(bot, eventName("ascent_mine_failed"),
                         "target", obstruction.toShortString(), "reason", returnMiner.failureReason());
                 ascentTarget = null;
             }
@@ -688,7 +744,7 @@ public final class AcquireWaterTask extends AbstractTask implements Checkpointab
 
         returnMiner.cancel(bot);
         if (!Standability.isStandable(world, ascentTarget)) {
-            BotLog.action(bot, "acquire_water_ascent_path_failed",
+            BotLog.action(bot, eventName("ascent_path_failed"),
                     "from", current.toShortString(), "to", ascentTarget.toShortString(),
                     "reason", "unsafe_landing");
             ascentTarget = null;
@@ -698,7 +754,7 @@ public final class AcquireWaterTask extends AbstractTask implements Checkpointab
         if (!ascentPathStarted) {
             ActionResult result = bot.getActionPack().startSurfacePathTo(ascentTarget);
             if (result.isFailed()) {
-                BotLog.action(bot, "acquire_water_ascent_path_failed",
+                BotLog.action(bot, eventName("ascent_path_failed"),
                         "from", current.toShortString(), "to", ascentTarget.toShortString(),
                         "reason", result.reason());
                 ascentTarget = null;
@@ -710,7 +766,7 @@ public final class AcquireWaterTask extends AbstractTask implements Checkpointab
         }
         if (bot.getActionPack().isPathExecutorIdle()
                 && totalBudget() - ascentPathStartedBudget > PATH_RETRY_INTERVAL) {
-            BotLog.action(bot, "acquire_water_ascent_path_failed",
+            BotLog.action(bot, eventName("ascent_path_failed"),
                     "from", current.toShortString(), "to", ascentTarget.toShortString(),
                     "reason", "ended_before_target");
             ascentTarget = null;
@@ -748,7 +804,7 @@ public final class AcquireWaterTask extends AbstractTask implements Checkpointab
         if (InventoryAction.equipFromSlot(bot, slot.getAsInt()) < 0) {
             failedAscentSupports.add(support.toImmutable());
             ascentTarget = null;
-            BotLog.action(bot, "acquire_water_ascent_support_failed",
+            BotLog.action(bot, eventName("ascent_support_failed"),
                     "pos", support.toShortString(), "reason", "equip_failed");
             return;
         }
@@ -757,13 +813,13 @@ public final class AcquireWaterTask extends AbstractTask implements Checkpointab
         if (result.isFailed()) {
             failedAscentSupports.add(support.toImmutable());
             ascentTarget = null;
-            BotLog.action(bot, "acquire_water_ascent_support_failed",
+            BotLog.action(bot, eventName("ascent_support_failed"),
                     "pos", support.toShortString(), "reason", result.reason());
             return;
         }
         pathAttempts = 0;
         noteAscentProgress();
-        BotLog.action(bot, "acquire_water_ascent_support_placed",
+        BotLog.action(bot, eventName("ascent_support_placed"),
                 "pos", support.toShortString(), "item", item);
     }
 
@@ -812,7 +868,7 @@ public final class AcquireWaterTask extends AbstractTask implements Checkpointab
                 bot, current, direction, "acquire_water_ascent_foundation")) {
             failedAscentSupports.add(support.toImmutable());
             ascentTarget = null;
-            BotLog.action(bot, "acquire_water_ascent_foundation_failed",
+            BotLog.action(bot, eventName("ascent_foundation_failed"),
                     "pos", foundation.toShortString(), "reason", "foundation_edge_unreachable");
             return;
         }
@@ -823,14 +879,14 @@ public final class AcquireWaterTask extends AbstractTask implements Checkpointab
         if (result.isFailed() || !returned) {
             failedAscentSupports.add(support.toImmutable());
             ascentTarget = null;
-            BotLog.action(bot, "acquire_water_ascent_foundation_failed",
+            BotLog.action(bot, eventName("ascent_foundation_failed"),
                     "pos", foundation.toShortString(),
                     "reason", result.isFailed() ? result.reason() : "foundation_edge_return_failed");
             return;
         }
         pathAttempts = 0;
         noteAscentProgress();
-        BotLog.action(bot, "acquire_water_ascent_foundation_placed",
+        BotLog.action(bot, eventName("ascent_foundation_placed"),
                 "pos", foundation.toShortString(), "item", item);
     }
 
@@ -850,7 +906,7 @@ public final class AcquireWaterTask extends AbstractTask implements Checkpointab
             failedAscentRelocations.clear();
             pathAttempts = 0;
             noteAscentProgress();
-            BotLog.action(bot, "acquire_water_ascent_relocated",
+            BotLog.action(bot, eventName("ascent_relocated"),
                     "to", reached.toShortString(),
                     "used", ascentRelocationsAtLevel,
                     "budget", MAX_ASCENT_RELOCATIONS_PER_LEVEL);
@@ -934,7 +990,7 @@ public final class AcquireWaterTask extends AbstractTask implements Checkpointab
         if (failed != null) {
             failedAscentRelocations.add(failed.toImmutable());
         }
-        BotLog.action(bot, "acquire_water_ascent_relocation_failed",
+        BotLog.action(bot, eventName("ascent_relocation_failed"),
                 "from", ascentRelocationOrigin == null
                         ? current.toShortString() : ascentRelocationOrigin.toShortString(),
                 "to", failed == null ? "none" : failed.toShortString(),
@@ -1006,14 +1062,14 @@ public final class AcquireWaterTask extends AbstractTask implements Checkpointab
             ascentRelocationTarget = target.toImmutable();
             ascentRelocationPathStarted = true;
             ascentRelocationStartedBudget = totalBudget();
-            BotLog.action(bot, "acquire_water_ascent_relocation",
+            BotLog.action(bot, eventName("ascent_relocation"),
                     "from", current.toShortString(), "to", target.toShortString(),
                     "ascent_rejections", ascentRejections);
             return true;
         }
         if (!"pathfinding_throttled".equals(result.reason())) {
             failedAscentRelocations.add(target.toImmutable());
-            BotLog.action(bot, "acquire_water_ascent_relocation_failed",
+            BotLog.action(bot, eventName("ascent_relocation_failed"),
                     "from", current.toShortString(), "to", target.toShortString(),
                     "reason", result.reason());
         }
@@ -1029,7 +1085,7 @@ public final class AcquireWaterTask extends AbstractTask implements Checkpointab
         ascentRelocationTarget = target.toImmutable();
         ascentRelocationPathStarted = false;
         ascentRelocationStartedBudget = totalBudget();
-        BotLog.action(bot, "acquire_water_ascent_relocation_carve",
+        BotLog.action(bot, eventName("ascent_relocation_carve"),
                 "from", current.toShortString(),
                 "to", target.toShortString(),
                 "obstruction", obstruction.toShortString(),
@@ -1117,7 +1173,7 @@ public final class AcquireWaterTask extends AbstractTask implements Checkpointab
         lastAscentBlockedPos = current.toImmutable();
         lastAscentBlockedReasons = reasons;
         lastAscentBlockedLogBudget = totalBudget();
-        BotLog.action(bot, "acquire_water_ascent_blocked",
+        BotLog.action(bot, eventName("ascent_blocked"),
                 "at", current.toShortString(), "reasons", reasons);
     }
 
@@ -1140,7 +1196,7 @@ public final class AcquireWaterTask extends AbstractTask implements Checkpointab
         int desired = InventoryAction.countItem(bot, Items.STONE_PICKAXE) + 1;
         ascentToolCraft = new CraftTask(Items.STONE_PICKAXE, desired);
         ascentToolCraft.start(bot);
-        BotLog.action(bot, "acquire_water_ascent_tool_replenish",
+        BotLog.action(bot, eventName("ascent_tool_replenish"),
                 "target", obstruction.toShortString(),
                 "item", Items.STONE_PICKAXE,
                 "desired", desired);
@@ -1151,7 +1207,7 @@ public final class AcquireWaterTask extends AbstractTask implements Checkpointab
         child.tick(bot);
         if (child.state() == TaskState.COMPLETED) {
             ascentToolCraft = null;
-            BotLog.action(bot, "acquire_water_ascent_tool_ready",
+            BotLog.action(bot, eventName("ascent_tool_ready"),
                     "item", Items.STONE_PICKAXE,
                     "count", InventoryAction.countItem(bot, Items.STONE_PICKAXE));
             return;
@@ -1456,7 +1512,7 @@ public final class AcquireWaterTask extends AbstractTask implements Checkpointab
             if (!"pathfinding_throttled".equals(result.reason())) {
                 pathAttempts = Math.min(MAX_RESTORABLE_PATH_ATTEMPTS, pathAttempts + 1);
             }
-            BotLog.action(bot, "acquire_water_path_retry",
+            BotLog.action(bot, eventName("path_retry"),
                     "phase", phase, "target", target.toShortString(), "reason", result.reason());
             if (phase == Phase.SEARCH && pathAttempts >= 3) {
                 if (result.reason().contains("GOAL_UNREACHABLE")
@@ -1776,6 +1832,16 @@ public final class AcquireWaterTask extends AbstractTask implements Checkpointab
         complete();
     }
 
+    @Override
+    protected void fail(String reason) {
+        super.fail(mode == Mode.RETURN_TO_SURFACE
+                ? reason.replaceFirst("^acquire_water", "return_to_surface") : reason);
+    }
+
+    private String eventName(String suffix) {
+        return (mode == Mode.RETURN_TO_SURFACE ? "return_to_surface_" : "acquire_water_") + suffix;
+    }
+
     private static boolean near(BlockPos first, BlockPos second) {
         return first != null && second != null && first.getSquaredDistance(second) <= ARRIVE_SQUARED;
     }
@@ -1791,6 +1857,9 @@ public final class AcquireWaterTask extends AbstractTask implements Checkpointab
         int durableBudget = Math.min(totalBudget(), elapsedLimit);
         Map<String, String> values = new LinkedHashMap<>();
         values.put("schema", String.valueOf(CHECKPOINT_SCHEMA));
+        if (mode == Mode.RETURN_TO_SURFACE) {
+            values.put("mode", Mode.RETURN_TO_SURFACE.name());
+        }
         values.put("phase", phase.name());
         values.put("surface_anchor", encode(anchor));
         values.put("search_origin", encode(searchOrigin == null ? anchor : searchOrigin));

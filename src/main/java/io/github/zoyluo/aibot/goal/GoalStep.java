@@ -36,6 +36,7 @@ public record GoalStep(Kind kind,
         STOCKPILE,
         DESCEND_TO_Y,
         ACQUIRE_WATER,
+        RETURN_TO_SURFACE,
         MAKE_OBSIDIAN,
         BUILD
     }
@@ -208,6 +209,15 @@ public record GoalStep(Kind kind,
                 null, "strict_survival", false);
     }
 
+    /** Bounded strict-survival recovery barrier; the original goal is replanned after completion. */
+    public static GoalStep returnToSurface(BlockPos anchor) {
+        if (anchor == null) {
+            throw new IllegalArgumentException("missing_surface_return_anchor");
+        }
+        return new GoalStep(Kind.RETURN_TO_SURFACE, null, 1, null, Set.of(), null, null,
+                anchor, "strict_survival", false);
+    }
+
     /** 造黑曜石:MAKE_OBSIDIAN 步——水浇岩浆现造 count 块(需背包桶+钻石镐)。 */
     public static GoalStep makeObsidian(int count) {
         return new GoalStep(Kind.MAKE_OBSIDIAN, null, count, null, Set.of(), null, null, null, null, false);
@@ -351,6 +361,7 @@ public record GoalStep(Kind kind,
             case STOCKPILE -> "囤入箱子 " + ItemNames.cn(item);
             case DESCEND_TO_Y -> "下挖到 Y=" + pos.getY();
             case ACQUIRE_WATER -> "物理寻找水源并装满水桶";
+            case RETURN_TO_SURFACE -> "物理返回地表";
             case MAKE_OBSIDIAN -> "造黑曜石 ×" + count;
             case BUILD -> "建造 " + tag;
         };

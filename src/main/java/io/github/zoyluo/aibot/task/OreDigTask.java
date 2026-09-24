@@ -4159,6 +4159,9 @@ public final class OreDigTask extends AbstractTask implements CheckpointableTask
                     || !ObservableWorldQuery.canObserveBlock(bot, support)) {
                 continue;
             }
+            if (!canMineStairCells(bot, world, ahead, ahead.up(), next)) {
+                continue;
+            }
             var supportState = world.getBlockState(support);
             boolean supported = supportState.getFluidState().isEmpty()
                     && !Standability.isDangerous(supportState)
@@ -4173,6 +4176,18 @@ public final class OreDigTask extends AbstractTask implements CheckpointableTask
             }
         }
         return null;
+    }
+
+    /** Do not select a stair direction whose visible obstruction is protected by the server. */
+    private static boolean canMineStairCells(AIPlayerEntity bot,
+                                             ServerWorld world,
+                                             BlockPos... positions) {
+        for (BlockPos pos : positions) {
+            if (!world.getBlockState(pos).isAir() && !world.canPlayerModifyAt(bot, pos)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static boolean isLava(ServerWorld world, BlockPos pos) {

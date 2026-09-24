@@ -29,6 +29,7 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.registry.Registries;
 import net.minecraft.util.Identifier;
+import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.Heightmap;
 
 import java.io.IOException;
@@ -157,6 +158,58 @@ public final class GoalPlanner {
             }
         }
         return false;
+    }
+
+    /**
+     * A fresh plan needs one physical surface-return barrier only when the current position is
+     * factually below the surface band and its next dependency requires surface resources. Typed
+     * planner failure is accepted here because it was produced from the same fresh observation;
+     * generic task strings such as no_resource_nearby are intentionally not evidence.
+     */
+    public static boolean needsSurfaceRecovery(AIPlayerEntity bot, GoalPlan freshPlan) {
+        if (bot == null || freshPlan == null || canAcquireSurfaceResources(bot)) {
+            return false;
+        }
+        if (freshPlan.unresolved().stream().anyMatch(reason ->
+                reason.startsWith("underground_surface_resource_unavailable:"))) {
+            return true;
+        }
+        if (!freshPlan.success() || freshPlan.steps().isEmpty()) {
+            return false;
+        }
+        return isSurfaceOnlyAcquisition(freshPlan.steps().get(0));
+    }
+
+    /**
+     * Reuse a mission origin only when the heightmap proves that it is a surface coordinate.
+     * Otherwise the current column's no-leaves terrain surface is the bounded return anchor.
+     */
+    public static BlockPos surfaceRecoveryAnchor(AIPlayerEntity bot, BlockPos missionOrigin) {
+        if (bot == null) {
+            throw new IllegalArgumentException("missing_surface_recovery_bot");
+        }
+        var world = bot.getServerWorld();
+        if (missionOrigin != null && isSurfaceCoordinate(world, missionOrigin)) {
+            return missionOrigin.toImmutable();
+        }
+        BlockPos current = bot.getBlockPos();
+        int topY = world.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES,
+                current.getX(), current.getZ());
+        return new BlockPos(current.getX(), topY, current.getZ());
+    }
+
+    private static boolean isSurfaceOnlyAcquisition(GoalStep step) {
+        return step != null && switch (step.kind()) {
+            case GATHER, HUNT, FARM, MILK_COW -> true;
+            default -> false;
+        };
+    }
+
+    private static boolean isSurfaceCoordinate(net.minecraft.server.world.ServerWorld world,
+                                               BlockPos position) {
+        int topY = world.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES,
+                position.getX(), position.getZ());
+        return Math.abs(topY - position.getY()) <= 8;
     }
 
     /**

@@ -19,6 +19,8 @@ public final class MiningMissionBudget {
     public static final int DESCEND_HARD_WINDOW_TICKS = 40_000;
     /** Conservative common envelope for short bounded auxiliary tasks. */
     public static final int SHORT_AUXILIARY_STEP_WINDOW_TICKS = 4_800;
+    /** Matches AcquireWaterTask's bounded physical RETURN_SURFACE controller. */
+    public static final int RETURN_TO_SURFACE_WINDOW_TICKS = 6_000;
     /** Fallback envelope for auxiliary tasks whose child-specific bound is not yet classified. */
     public static final int AUXILIARY_STEP_WINDOW_TICKS = 24_000;
     public static final int FROM_ZERO_BOOTSTRAP_MARGIN_TICKS = 24_000;
@@ -177,6 +179,7 @@ public final class MiningMissionBudget {
         }
         return switch (kind) {
             case CRAFT -> SHORT_AUXILIARY_STEP_WINDOW_TICKS;
+            case RETURN_TO_SURFACE -> RETURN_TO_SURFACE_WINDOW_TICKS;
             case HUNT -> Math.toIntExact(Math.max(
                     SHORT_AUXILIARY_STEP_WINDOW_TICKS,
                     Math.addExact(Math.multiplyExact((long) count, 480L), 1L)));

@@ -31,6 +31,9 @@ public final class DeepSeekApiClient {
     }
 
     public ChatResponse chat(List<ChatMessage> history, List<ToolDefinition> tools) throws DeepSeekApiException {
+        if ("codex".equalsIgnoreCase(config.backend())) {
+            return new CodexAppServerClient(config).chat(history, tools);
+        }
         if (config.apiKey() == null || config.apiKey().isBlank()) {
             throw new DeepSeekApiException("deepseek_api_key_missing");
         }

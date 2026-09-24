@@ -21,6 +21,14 @@ AIBot 将“代码通过测试”“场景在本机通过”和“可作为发�
 
 When the window expires, `TaskManager` stops the active task through its normal cleanup and publishes one `stuck:<task>` reason to task status and the failure record. `GoalExecutor` uses its existing bounded deterministic replanning. A terminal no-progress goal is reported and does not trigger a new model turn to recreate the same work. These rules describe source behavior only; they do not claim live-server verification.
 
+## 地下任务的地表复归
+
+strict survival 下，只有 fresh GoalPlan 同时证明 bot 位于地表带之外、且下一依赖是地表资源时，才会插入一个有界的 `RETURN_TO_SURFACE`。证明包括 planner 的 `underground_surface_resource_unavailable:` 未解析原因，或成功计划的首个依赖为 `GATHER`、`HUNT`、`FARM`、`MILK_COW`。普通 `no_resource_nearby` 等任务失败字符串不会单独触发该路径。
+
+该步骤复用普通物理上升，必须到达可复用的干燥出口后才完成；随后从 live state 为原始 Goal 重新规划。未能继续时会以 `surface_recovery_replan_failed:<reason>` 结束。其他失败继续使用既有有界 replan 规则。本机制不保证任何资源或路线都可恢复，也不启用 teleport、hidden-block scan 或其他特权世界操作。
+
+以上是本次源码实现的行为说明。尚未部署，也没有 runtime/world 验证；本次仅运行编译与 diff 检查。
+
 ## 生产边界
 
 `AIBotTestSubcommand`、`AIBotVerifySubcommand`、GameTest 类和 restart harness 都位于 `src/gametest`。生产 `src/main` 不注册 `/aibot test` 或 `/aibot verify`，生产 jar 也不应包含这些类。

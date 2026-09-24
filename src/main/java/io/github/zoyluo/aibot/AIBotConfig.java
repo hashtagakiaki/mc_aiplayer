@@ -90,7 +90,7 @@ public record AIBotConfig(
         if (envKey != null && !envKey.isBlank()) {
             loaded = loaded.withDeepSeek(loaded.deepseek().withApiKey(envKey));
         }
-        if (loaded.deepseek().apiKey().isBlank()) {
+        if (!"codex".equalsIgnoreCase(loaded.deepseek().backend()) && loaded.deepseek().apiKey().isBlank()) {
             BotLog.warn(LogCategory.CONFIG, null, "deepseek_key_missing");
         }
         instance = loaded;
@@ -132,7 +132,7 @@ public record AIBotConfig(
                 OperatorCapabilities.defaults(),
                 // V4 的 reasoning 与正文共享 max_tokens,故显式降低 effort 并放宽预算,
                 // 避免思考过程吃光额度、让本该发出的 tool_call 被截断。
-                new DeepSeek("", "https://api.deepseek.com", "deepseek-v4-flash", 8192, 0.3D, 60, 3, 500,
+                new DeepSeek("deepseek", "", "https://api.deepseek.com", "deepseek-v4-flash", 8192, 0.3D, 60, 3, 500,
                         Boolean.TRUE, "low"),
                 new Perception(16, 20, 10, 10, false),
                 new Brain(36, 6, 12, false, true, false, 3, true), // 优化4:maxTurns 24→12——挖矿失败后大脑手动逐格挖会瞬间耗轮,早止损早复位(善后已有 clear+resetIdle)
@@ -202,6 +202,7 @@ public record AIBotConfig(
      * tool call the bot actually needs.</p>
      */
     public record DeepSeek(
+            String backend,
             String apiKey,
             String baseUrl,
             String model,
@@ -216,12 +217,13 @@ public record AIBotConfig(
         public static final List<String> REASONING_EFFORTS = List.of("low", "high", "max");
 
         DeepSeek withApiKey(String apiKey) {
-            return new DeepSeek(apiKey, baseUrl, model, maxTokens, temperature, timeoutSeconds,
+            return new DeepSeek(backend, apiKey, baseUrl, model, maxTokens, temperature, timeoutSeconds,
                     retryCount, retryBackoffMs, thinking, reasoningEffort);
         }
 
         DeepSeek withDefaults(DeepSeek defaults) {
             return new DeepSeek(
+                    blankToDefault(backend, defaults.backend),
                     apiKey == null ? defaults.apiKey : apiKey,
                     blankToDefault(baseUrl, defaults.baseUrl),
                     blankToDefault(model, defaults.model),
