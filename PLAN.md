@@ -73,7 +73,7 @@ Full verification:
 
 ## Wave 1
 
-- [ ] Task 1: 既存監視と復旧の接続を隔離ワールドで確認する
+- [x] Task 1: 既存監視と復旧の接続を隔離ワールドで確認する
   Writes:
   - `src/gametest/java/io/github/zoyluo/aibot/task/RecoveryDesignProbeGameTests.java`（一時実験、結果記録後に削除または有効な回帰チェックへ移行）
   - `src/gametest/resources/fabric.mod.json`（上記probeの一時登録）
@@ -113,10 +113,43 @@ Full verification:
 
 ## Deferred work
 
-- Wave 2候補: Wave 1の正常/異常トレースを根拠に、既存StuckWatcherと原Missionの進捗判定を統一する小さな実績形式を実装。監視と待機の回帰検証を先に通す。必要なTaskのみ実績供給を追加し、未対応有限Taskには明示的な上限を残す。具体的Writesはprobe結果後に確定する。
-- Wave 3候補: Wave 1の接続点確認後、原Missionに一段の復旧状態、失敗情報、予算を追加。GoalPlannerの既存の前提補充と地上復帰を接続し、復旧判断時だけ既存LLMクライアントへ問い合わせる。既存の通常tool dispatchは復旧提案の実行主体にせず、GoalExecutorが検証して実行する。必要な補給/探索操作が足りなければこの段階で最小限追加する。
-- Wave 4候補: 復旧の永続化、取消/置換/遅延応答/キューとの統合を検証し、READMEとdocs/TESTING_AND_EVIDENCE.mdへ実際の挙動と証拠範囲を記載。統合チェック後にユーザー所有originへcommit/pushする。デプロイは別の明示依頼で行う。
+- Wave 2, Task 1: タスク内の実績/待機根拠を統一する。
+  - Writes: `src/main/java/io/github/zoyluo/aibot/task/Task.java`, `StuckWatcher.java`, `MoveTask.java`, `GatherQuotaTask.java`, `OreDigTask.java`, `FarmTask.java`, `SmeltTask.java`; 対応する `src/test` または `src/gametest` の監視回帰テスト。
+  - Reads: `BlockMiner.java`, `TaskManager.java`, 既存のtask-owned watchdogとtimeout実装。
+  - Change: `progress()`を判定根拠から外し、タスクが返す最小の実績変更と期限付き待機情報で既存監視窓を判定する。採掘/移動のタスク内watchdogは重複させない。有限taskで未対応の待機は無期限免除にしない。
+  - Verify: 静止、座標往復、progress往復、無関係な在庫変化、実ブロック破壊の進展、掘削式移動、作物成熟待ち、精錬待ちを固定fixtureで比較し、`./gradlew test` と `./gradlew runGameTest`。
+  - Expected: 見せかけの変化では監視が更新されず、taskが報告した実績か具体的な待機条件だけが次の判定を決める。正常な長時間作業を誤停止しない。
+  - Commit: `fix: base task watchdog on useful outcomes`。
+- Wave 2, Task 2: 原Mission単位の進捗と反復予算を保持する。
+  - Writes: `src/main/java/io/github/zoyluo/aibot/goal/GoalExecutor.java`, `src/main/java/io/github/zoyluo/aibot/persist/MissionRecord.java`, `MissionRuntimeRecord.java`, `MissionSpec.java`, 対応するGoalExecutor/persistence tests。
+  - Reads: Wave 2 Task 1の実績型、`EpisodeMemory.java`, `DecisionSession.java`, `scripts/persistence_restart_test.sh`。
+  - Change: 初回に得た必要前提/探索実績と、同じ障害に対する試行済み手段・上限をactive missionに保持する。位置、表示progress、無関係な所持品や途中task成功だけでは予算を戻さない。シリアライズはバージョン互換を保つ。
+  - Verify: 往復、A→B→A、前提条件の実取得後の再試行、再起動後の予算維持、cancel/replaceの永続化境界を固定fixtureと `bash scripts/persistence_restart_test.sh` で確認。
+  - Expected: 原目標が前進したかと同じ試行の反復をModが決定でき、再起動で上限を洗い流さない。
+  - Commit: `feat: retain mission progress and retry budget`。
+- Wave 3, Task 1: 失敗を一段のmission recoveryへ接続する。
+  - Writes: `src/main/java/io/github/zoyluo/aibot/goal/GoalExecutor.java`, `src/main/java/io/github/zoyluo/aibot/brain/BrainCoordinator.java`, `DecisionSession.java`, 必要なら `CodexAppServerClient.java`/固定応答テスト。
+  - Reads: Wave 2の実績/予算、`GoalPlanner.java`, `ToolRegistry.java`, `MissionRecord.java`, `GoalExecutor.submit`の保護規則。
+  - Change: 失敗理由・未達条件・前後の実績・観測済み候補・試行済み手段を一つの復旧要求にし、GoalExecutorが元Missionのauthorityを保持してLLMへ一案のみ問い合わせる。提案をModが検証し、既存typed Goal/Taskとして一段だけ実行する。補助手順後は原目標をfresh stateから再評価する。
+  - Verify: 素材補給後の原目標再開、同一案拒否、観測範囲で未発見/権限拒否の分離、実行中のcancel/replaceと遅延応答、未対応の必要操作がない場合のbounded failureを固定応答GameTestで確認。
+  - Expected: LLMは次の手段の提案だけを行い、同じ失敗を言い換えて繰り返せず、前提準備を最終成果として誤報告しない。
+  - Commit: `feat: recover failed goals through bounded mission actions`。
+- Wave 4, Task 1: 統合・永続化・利用者向け挙動を検証する。
+  - Writes: 必要な統合修正、`README.md`, `docs/TESTING_AND_EVIDENCE.md`。
+  - Reads: Wave 2/3の変更一式と現行の検証手順。
+  - Change: 端末結果、復旧中、予算到達を区別し、実装済みの挙動と証拠範囲を文書化する。
+  - Verify: `./gradlew test`, `./gradlew runGameTest`, `./gradlew build`, `bash scripts/persistence_restart_test.sh`, `git diff --check`。
+  - Expected: 全acceptance criteriaが隔離環境で確認される。統合失敗があればPLANを保ったまま該当Waveへ戻る。
+  - Commit: `docs: document bounded mission recovery`（統合修正は別commit）。originへのpushは完了検証後。
+
+### Wave 1 evidence
+
+- Isolated probe (`RecoveryDesignProbeGameTests`, temporary and removed after evidence capture): `./gradlew runGameTest` against only the probe passed, `1/1`; report time `0.943s`. It observed that an unchanged finite task fails as `stuck:<task>` at the configured 200 tick window; position and displayed progress changes reset that window; `isWaiting()` removes its sample each tick, so the generic watcher supplies no deadline while waiting; after wait clears, a new full observation window starts. The fixture toggled `progress()` in its task tick, so a first attempt incorrectly kept oscillating after wait release and timed out; disabling oscillation when clearing the wait corrected the fixture, and the isolated run passed.
+- No active task code was changed. `MoveTask.progress()` is elapsed-time-derived and `isWaiting()` is true during digging; `OreDigTask` and `GatherQuotaTask` return true for the full operation and retain their own no-progress/roaming or timeout guards; `SmeltTask` reports a concrete SMELTING phase but also exempts digging approaches; `FarmTask` has an observed immature-crop wait plus an intentional ongoing-tend mode. Therefore Wave 2 must preserve task-owned watchdogs and distinguish concrete wait states from open-ended intent.
+- Fresh resource-dependent plans already change with inventory state: `GoalPlanner.planFromState` expands current inventory through `ensureItem`, and existing GameTests compare empty vs carried materials. This supports reusing the deterministic planner after a recovery action; it does not establish that every terrain/resource alternative is available. `GoalExecutor.submit` rejects prerequisite goals against an active goal, so a recovery supplement must remain under original mission ownership rather than use ordinary submit/queue semantics. `finishActive` and existing checkpoint/return guards remain the safe interruption boundary.
+- First full `./gradlew runGameTest` executed 589 tests and exited 1: the temporary probe's initial fixture bug above, plus existing `DeathRecoveryMissionGameTests.haveItemSurvivesDeathRecoveryAndPreservesQueuedMineOre` failed with `missing result for resumed mission`. The isolated corrected probe then passed. After probe cleanup, the full rerun executed 588 tests and reproduced only that same existing failure (`missing result for resumed mission`); it is outside the allocated probe scope and no production/test behavior files were changed. During cleanup, the saved manifest copy still contained the temporary entrypoint; the attempted run caught this as `ClassNotFound`, the entrypoint was removed explicitly, and the final full run used the restored manifest. Verify manifest has no probe registration before future cleanup of similar experiments.
 
 ## Plan updates
 
 - 2026-09-25: Astraによるソース調査。資源依存の再計画は既に存在し、主な設計課題は進捗の根拠、既存のループ抑制と矛盾しないLLM復旧への移行、原目標と実行権限の維持と判明。全面的なplanner置換を除外した。
+- 2026-09-25: Wave 1の一時GameTestでStuckWatcherの座標/progress resetと無期限`isWaiting`免除を再現。初回probeの待機解除後のfixture自身のprogress振動を止め、対象のみ1/1成功。cleanup後のfull runは588件を実行し、既存`haveItemSurvivesDeathRecoveryAndPreservesQueuedMineOre`の`missing result for resumed mission` 1件のみでexit 1。再現したsuite失敗はWave 1の変更範囲外。
