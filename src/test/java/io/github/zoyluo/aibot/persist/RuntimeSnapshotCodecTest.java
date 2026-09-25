@@ -9,11 +9,62 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RuntimeSnapshotCodecTest {
     @Test
+    void legacyMissionCheckpointStartsWithEmptyRetryState() {
+        assertEquals(MissionRecord.RecoveryState.legacy(),
+                MissionRecord.decodeRecoveryState(Map.of()).orElseThrow());
+    }
+
+    @Test
+    void recoveryMethodHistoryRejectsOutAndBackAndOnlyRetriesAfterMissionProgress() {
+        MissionRecord.RecoveryState state = new MissionRecord.RecoveryState(
+                0, 0, 0, Map.of("minecraft:iron_ingot", 0), 0, java.util.Set.of());
+        state = MissionRecord.reserveRecoveryAttempt(state, "need_iron", "mine_iron").orElseThrow();
+        state = MissionRecord.reserveRecoveryAttempt(state, "need_food", "hunt_animals").orElseThrow();
+        assertTrue(MissionRecord.reserveRecoveryAttempt(
+                state, "need_iron", "mine_iron").isEmpty(), "A→B→A repeated A");
+
+        MissionRecord.RecoveryState unrelated = MissionRecord.observeRelevantItem(
+                state, "minecraft:stick", 8);
+        assertEquals(state, unrelated, "unrelated inventory must not be a milestone");
+        MissionRecord.RecoveryState afterPrerequisite = MissionRecord.observeRelevantItem(
+                state, "minecraft:iron_ingot", 1);
+        assertEquals(1, afterPrerequisite.progressRevision());
+        assertEquals(afterPrerequisite, MissionRecord.observeRelevantItem(
+                afterPrerequisite, "minecraft:iron_ingot", 0),
+                "out movement in inventory cannot lower the high-water mark");
+        assertEquals(afterPrerequisite, MissionRecord.observeRelevantItem(
+                afterPrerequisite, "minecraft:iron_ingot", 1),
+                "return to the same count cannot create a duplicate milestone");
+        MissionRecord.RecoveryState retry = MissionRecord.reserveRecoveryAttempt(
+                afterPrerequisite, "need_iron", "mine_iron").orElseThrow();
+        assertEquals(3, retry.attemptsUsed());
+        assertTrue(MissionRecord.reserveRecoveryAttempt(
+                retry, "different_condition", "another_method").isEmpty(),
+                "the mission retry budget remains bounded after progress");
+
+        Map<String, String> encoded = MissionRecord.encodeRecoveryState(retry);
+        assertEquals(retry, MissionRecord.decodeRecoveryState(encoded).orElseThrow());
+        Map<String, String> partial = new java.util.HashMap<>(encoded);
+        partial.remove("mission.recovery_attempt.2");
+        assertTrue(MissionRecord.decodeRecoveryState(partial).isEmpty(),
+                "a partial history must not reset the retry budget");
+    }
+
+    @Test
+    void unrelatedInventoryAndOutAndBackCountsDoNotAdvanceRelevantHighWater() {
+        assertFalse(MissionRecord.relevantItemAdvanced(7, 7));
+        assertFalse(MissionRecord.relevantItemAdvanced(7, 2));
+        assertTrue(MissionRecord.relevantItemAdvanced(7, 8));
+    }
+
+    @Test
     void roundTripsCurrentSchema() {
-        Map<String, String> checkpoint = Map.ofEntries(
+        Map<String, String> checkpoint = new java.util.LinkedHashMap<>(Map.ofEntries(
                 Map.entry("completed_steps", "9"),
                 Map.entry("task_kind", "MINING_SERVICE"),
                 Map.entry("task.schema", "1"),
@@ -38,7 +89,9 @@ class RuntimeSnapshotCodecTest {
                 Map.entry("aux_mining.face", "12,-59,24"),
                 Map.entry("aux_mining.budget_used", "37"),
                 Map.entry("aux_mining.ore_fingerprint",
-                        "minecraft:coal_ore,minecraft:deepslate_coal_ore"));
+                        "minecraft:coal_ore,minecraft:deepslate_coal_ore")));
+        checkpoint.putAll(MissionRecord.encodeRecoveryState(
+                new MissionRecord.RecoveryState(4, 3, 2, Map.of(), 0, java.util.Set.of())));
         BotRecord bot = new BotRecord(
                 "MiningCodecBot", "minecraft:overworld",
                 12.5D, -59.0D, 24.5D, 0.0F, 0.0F,

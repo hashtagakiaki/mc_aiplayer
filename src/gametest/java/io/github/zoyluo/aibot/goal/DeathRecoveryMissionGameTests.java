@@ -4,6 +4,7 @@ import io.github.zoyluo.aibot.action.InventoryAction;
 import io.github.zoyluo.aibot.entity.AIPlayerEntity;
 import io.github.zoyluo.aibot.manager.AIPlayerManager;
 import io.github.zoyluo.aibot.persist.MissionRuntimeRecord;
+import io.github.zoyluo.aibot.persist.MissionRecord;
 import io.github.zoyluo.aibot.runtime.RuntimeLifecycleCoordinator;
 import io.github.zoyluo.aibot.runtime.TaskOrigin;
 import io.github.zoyluo.aibot.task.RecoverDropsTask;
@@ -50,6 +51,50 @@ public final class DeathRecoveryMissionGameTests implements FabricGameTest {
                 Items.SWEET_BERRIES,
                 new Goal.MineOre(Set.of(Blocks.IRON_ORE), 1),
                 Items.RAW_IRON);
+    }
+
+    @GameTest(templateName = FabricGameTest.EMPTY_STRUCTURE, tickLimit = 200)
+    public void missionRetryLedgerSurvivesRestoreAndResetsOnlyAtReplace(TestContext context) {
+        String botName = "MissionRetryGT";
+        var world = context.getWorld();
+        BlockPos cell = context.getAbsolutePos(new BlockPos(1, 2, 1));
+        prepareCell(world, cell);
+        AIPlayerEntity bot = AIPlayerManager.INSTANCE.spawn(
+                        world.getServer(), botName, world, Vec3d.ofBottomCenter(cell),
+                        0.0F, 0.0F, GameMode.SURVIVAL)
+                .orElseThrow(() -> new IllegalStateException("failed to spawn " + botName));
+        Goal original = new Goal.HaveItem(Items.SWEET_BERRIES, 1);
+        Goal replacement = new Goal.HaveItem(Items.RAW_IRON, 1);
+        require(context, GoalExecutor.INSTANCE.submit(bot, original), "original mission submit failed");
+        require(context, GoalExecutor.INSTANCE.recordRecoveryAttempt(
+                bot, "missing_prerequisite", "gather_berries"), "first attempt not recorded");
+        MissionRuntimeRecord beforeRestart = GoalExecutor.INSTANCE.captureRuntime(bot);
+        require(context, beforeRestart.active() != null, "active mission checkpoint missing");
+        MissionRecord.RecoveryState saved = MissionRecord.decodeRecoveryState(
+                beforeRestart.active().checkpoint()).orElseThrow();
+        require(context, saved.attemptsUsed() == 1, "attempt count was not persisted");
+
+        GoalExecutor.INSTANCE.unload(bot);
+        GoalExecutor.INSTANCE.restoreRuntime(bot, beforeRestart);
+        require(context, GoalExecutor.INSTANCE.remainingRecoveryAttempts(bot) == 2,
+                "restart reset the mission retry budget");
+        require(context, !GoalExecutor.INSTANCE.recordRecoveryAttempt(
+                bot, "missing_prerequisite", "gather_berries"),
+                "restart forgot an already tried recovery method");
+
+        require(context, GoalExecutor.INSTANCE.cancelCurrent(bot, "gametest_replace"),
+                "mission cancellation failed");
+        require(context, GoalExecutor.INSTANCE.captureRuntime(bot).active() == null,
+                "cancelled mission remained persistent");
+        require(context, GoalExecutor.INSTANCE.submit(bot, replacement), "replacement submit failed");
+        require(context, GoalExecutor.INSTANCE.remainingRecoveryAttempts(bot) == 3,
+                "replacement inherited the old mission's retry budget");
+        require(context, GoalExecutor.INSTANCE.recordRecoveryAttempt(
+                bot, "missing_prerequisite", "gather_berries"),
+                "replacement incorrectly inherited tried methods");
+        GoalExecutor.INSTANCE.cancelAll(bot);
+        AIPlayerManager.INSTANCE.despawn(world.getServer(), botName);
+        context.complete();
     }
 
     private static void runScenario(TestContext context,

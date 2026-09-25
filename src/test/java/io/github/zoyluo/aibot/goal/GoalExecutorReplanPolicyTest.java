@@ -81,8 +81,8 @@ class GoalExecutorReplanPolicyTest {
     }
 
     @Test
-    void huntAcceptsOnlyNetRawMeatOrNewVisitedSectorAsExtraProgress() {
-        assertTrue(progress(
+    void huntOnlyAcceptsNewVisitedSectorHereItemProgressUsesMissionHighWater() {
+        assertFalse(progress(
                 GoalStep.Kind.HUNT,
                 2, 2,
                 0, 0,
@@ -101,8 +101,8 @@ class GoalExecutorReplanPolicyTest {
     }
 
     @Test
-    void completedStepAndGoalOutputRemainUniversalProgress() {
-        assertTrue(progress(
+    void childStepCompletionDoesNotResetMissionRetryBudgetButGoalOutputDoes() {
+        assertFalse(progress(
                 GoalStep.Kind.HUNT,
                 3, 2,
                 0, 0,
@@ -121,8 +121,8 @@ class GoalExecutorReplanPolicyTest {
     }
 
     @Test
-    void nonHuntTasksRetainControlledMovementProgress() {
-        assertTrue(progress(
+    void nonHuntTravelDoesNotResetMissionRetryBudget() {
+        assertFalse(progress(
                 GoalStep.Kind.MINE_ORE,
                 2, 2,
                 0, 0,
@@ -130,7 +130,7 @@ class GoalExecutorReplanPolicyTest {
                 7, 7,
                 8, 70, 0,
                 0, 70, 0));
-        assertTrue(progress(
+        assertFalse(progress(
                 GoalStep.Kind.MINE_ORE,
                 2, 2,
                 0, 0,
@@ -141,7 +141,7 @@ class GoalExecutorReplanPolicyTest {
     }
 
     @Test
-    void nonHuntMovementProgressIsDimensionBoundAndLegacySafe() {
+    void movementAndChildCompletionDoNotBecomeMissionProgressAcrossDimensions() {
         assertFalse(progressInDimensions(
                 GoalStep.Kind.MINE_ORE,
                 2, 2,
@@ -160,7 +160,7 @@ class GoalExecutorReplanPolicyTest {
                 OVERWORLD, "",
                 8, 69, 0,
                 0, 70, 0));
-        assertTrue(progressInDimensions(
+        assertFalse(progressInDimensions(
                 GoalStep.Kind.MINE_ORE,
                 3, 2,
                 0, 0,
@@ -169,7 +169,13 @@ class GoalExecutorReplanPolicyTest {
                 "minecraft:the_nether", OVERWORLD,
                 0, 70, 0,
                 0, 70, 0),
-                "completed steps remain universal across dimensions");
+                "child step completion is not a mission milestone");
+    }
+
+    @Test
+    void progressRevisionIsMonotonicSoOutAndBackNoiseCannotRefreshBudget() {
+        assertFalse(GoalExecutor.missionProgressAdvanced(4, 4));
+        assertTrue(GoalExecutor.missionProgressAdvanced(5, 4));
     }
 
     private static boolean progress(
@@ -182,13 +188,8 @@ class GoalExecutorReplanPolicyTest {
             int snapshotX, int snapshotY, int snapshotZ) {
         return GoalExecutor.madeReplanProgress(
                 kind,
-                completedSteps, snapshotSteps,
                 targetCount, snapshotTargetCount,
-                huntRawMeat, snapshotHuntRawMeat,
-                huntVisitedSectors, snapshotHuntVisitedSectors,
-                OVERWORLD, OVERWORLD,
-                x, y, z,
-                snapshotX, snapshotY, snapshotZ);
+                huntVisitedSectors, snapshotHuntVisitedSectors);
     }
 
     private static boolean progressInDimensions(
@@ -202,12 +203,7 @@ class GoalExecutorReplanPolicyTest {
             int snapshotX, int snapshotY, int snapshotZ) {
         return GoalExecutor.madeReplanProgress(
                 kind,
-                completedSteps, snapshotSteps,
                 targetCount, snapshotTargetCount,
-                huntRawMeat, snapshotHuntRawMeat,
-                huntVisitedSectors, snapshotHuntVisitedSectors,
-                dimension, snapshotDimension,
-                x, y, z,
-                snapshotX, snapshotY, snapshotZ);
+                huntVisitedSectors, snapshotHuntVisitedSectors);
     }
 }

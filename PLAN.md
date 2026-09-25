@@ -121,10 +121,10 @@ Full verification:
   - Expected: 見せかけの変化では監視が更新されず、taskが報告した実績か具体的な待機条件だけが次の判定を決める。正常な長時間作業を誤停止しない。
   - Commit: `fix: base task watchdog on useful outcomes`。
   - Plan update: 全38 concrete Taskを監査する。isWaiting実装21種は各有限タスクの有界watchdogを確認してtask-managed policyを明示し、無期限ユーザー指示（Hold/Guard/Follow）だけをongoingとする。非waitのうち200tickを超える正当作業のあるMine/StripMine/Combat/Breedだけ成果イベントを追加。他の非wait Taskは無成果で監視窓を超えたらstuckにする。共通のprogress evidence counterはAbstractTaskに保持する。
-- Wave 2, Task 2: 原Mission単位の進捗と反復予算を保持する。
-  - Writes: `src/main/java/io/github/zoyluo/aibot/goal/GoalExecutor.java`, `src/main/java/io/github/zoyluo/aibot/persist/MissionRecord.java`, `MissionRuntimeRecord.java`, `MissionSpec.java`, 対応するGoalExecutor/persistence tests。
+- [x] Wave 2, Task 2: 原Mission単位の進捗と反復予算を保持する。
+  - Writes: `src/main/java/io/github/zoyluo/aibot/goal/GoalExecutor.java`, `src/main/java/io/github/zoyluo/aibot/persist/MissionRecord.java`, `MissionRuntimeRecord.java`, `MissionSpec.java`, 対応するGoalExecutor/persistence testsとMissionRuntime lifecycle GameTests（現対象 `DeathRecoveryMissionGameTests.java`）。
   - Reads: Wave 2 Task 1の実績型、`EpisodeMemory.java`, `DecisionSession.java`, `scripts/persistence_restart_test.sh`。
-  - Change: 初回に得た必要前提/探索実績と、同じ障害に対する試行済み手段・上限をactive missionに保持する。位置、表示progress、無関係な所持品や途中task成功だけでは予算を戻さない。シリアライズはバージョン互換を保つ。
+  - Change: 初回に得た必要前提/探索実績と、同じ障害に対する試行済み手段・上限をactive missionに保持する。位置、表示progress、無関係な所持品や途中task成功だけでは予算を戻さない。mission.* checkpoint codec/value recordはMissionRecordへ置き、GoalExecutorへ復元・採用判断だけを残す。シリアライズは旧checkpointとバージョン互換を保つ。
   - Verify: 往復、A→B→A、前提条件の実取得後の再試行、再起動後の予算維持、cancel/replaceの永続化境界を固定fixtureと `bash scripts/persistence_restart_test.sh` で確認。
   - Expected: 原目標が前進したかと同じ試行の反復をModが決定でき、再起動で上限を洗い流さない。
   - Commit: `feat: retain mission progress and retry budget`。
@@ -164,3 +164,12 @@ Full verification:
 - Final `./gradlew runGameTest` ran 594 tests; the six new cases passed. The sole failure remains the Wave 1 baseline `DeathRecoveryMissionGameTests.haveItemSurvivesDeathRecoveryAndPreservesQueuedMineOre` (`missing result for resumed mission`). Final log: `/tmp/mcaiplayer-wave2-rungametest-final3.log`; XML: `build/test-results/gametest/TEST-aibot-gametest.xml`.
 - `git diff --check` passed. The new test entrypoint is registered once; no temporary probe files or backups remain. No production server, jar, configuration, or world was changed.
 - 2026-09-25: Wave 2 Task 1 completed with the above verification boundary. The known DeathRecovery failure predates this task and remains visible for later full verification.
+
+### Wave 2 Task 2 evidence
+
+- `MissionRecord` now encodes bounded progress/recovery state in the existing `mission.*` checkpoint namespace. Legacy checkpoints without that namespace start empty; partial or invalid namespaces are rejected rather than resetting a retry budget. No runtime record/schema migration was needed.
+- `GoalExecutor` tracks high-water counts for the original goal and planned prerequisite items, plus HUNT search sectors. It rejects duplicate condition/method attempts at the same progress revision and caps the mission at three recovery attempts. Position, display progress, unrelated inventory, and child-step completion do not advance the retry watermark.
+- Added JUnit coverage for inventory oscillation, A→B→A method repetition, retry after relevant item acquisition, preserved cap, round-trip codec, and malformed partial state. Added lifecycle GameTest coverage for restore, cancel, and goal replacement.
+- Focused 17 JUnit tests passed; `./gradlew test`, `./gradlew compileGametestJava`, and `bash scripts/persistence_restart_test.sh` passed. The restart script result is under `build/persistence-restart/20260925T041450Z-193728-13118`.
+- `./gradlew runGameTest` executed 595 cases: the new lifecycle case passed and the only failure was the same baseline `haveItemSurvivesDeathRecoveryAndPreservesQueuedMineOre` (`missing result for resumed mission`). `git diff --check` passed. No production server, jar, configuration, or world was changed.
+- 2026-09-25: Wave 2 Task 2 implemented by gpt-6-luna; verification and the existing full GameTest failure are recorded above.

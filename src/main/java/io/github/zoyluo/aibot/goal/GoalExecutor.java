@@ -1461,7 +1461,14 @@ public final class GoalExecutor {
                 active.taskCheckpoint.clear();
                 active.taskCheckpointKind = null;
             }
+            active.missionProgressRevision = restore.missionProgressRevision();
+            active.snapMissionProgressRevision = restore.snapMissionProgressRevision();
+            active.missionExplorationHighWater = restore.missionExplorationHighWater();
+            active.missionItemHighWater.putAll(restore.missionItemHighWater());
+            active.recoveryAttemptsUsed = restore.recoveryAttemptsUsed();
+            active.attemptedRecoveryMethods.addAll(restore.attemptedRecoveryMethods());
         }
+        registerMissionItems(bot, active, restoredSteps);
         if (restore == null || !restore.postconditionRepair().persisted()) {
             active.lastEvaluationMatched = initialEvaluation.matched();
         }
@@ -1479,6 +1486,7 @@ public final class GoalExecutor {
                     .getValue().toString();
             active.snapHuntRawMeat = rawMeatCount(bot);
             active.snapHuntVisitedSectors = active.huntSearchCursor.visitedCount();
+            active.snapMissionProgressRevision = active.missionProgressRevision;
         }
         activePlans.put(bot.getUuid(), active);
         // 工作记忆 episode 边界:新目标=新 episode,上一件事的排除项/轨迹作废。
@@ -2072,6 +2080,7 @@ public final class GoalExecutor {
         ActivePlan active = activePlans.get(bot.getUuid());
         if (active != null) {
             captureTaskEvidence(bot, active);
+            observeMissionProgress(bot, active);
         }
         MissionRecord activeRecord = active == null ? null : new MissionRecord(
                 active.missionId.toString(), MissionSpec.fromGoal(active.goal), checkpoint(active));
@@ -2080,6 +2089,39 @@ public final class GoalExecutor {
         boolean hasPersistableMission = activeRecord != null || !queue.isEmpty();
         return new MissionRuntimeRecord(activeRecord, queue,
                 hasPersistableMission && TaskManager.INSTANCE.isUserPaused(bot));
+    }
+
+    /**
+     * Records one model-proposed recovery action under its stable failure/method identity. The
+     * progress revision is part of the identity: a newly acquired relevant prerequisite permits
+     * the same method to be tried again, while A→B→A at the same mission state is rejected.
+     */
+    public boolean recordRecoveryAttempt(AIPlayerEntity bot,
+                                         String conditionKey,
+                                         String methodKey) {
+        ActivePlan plan = activePlans.get(bot.getUuid());
+        if (plan == null || conditionKey == null || conditionKey.isBlank()
+                || methodKey == null || methodKey.isBlank()
+                || conditionKey.length() > 256 || methodKey.length() > 256
+                || plan.recoveryAttemptsUsed >= MissionRecord.RECOVERY_ATTEMPT_LIMIT) {
+            return false;
+        }
+        MissionRecord.RecoveryState updated = MissionRecord.reserveRecoveryAttempt(
+                missionRecoveryState(plan), conditionKey, methodKey).orElse(null);
+        if (updated == null) {
+            return false;
+        }
+        plan.recoveryAttemptsUsed = updated.attemptsUsed();
+        plan.attemptedRecoveryMethods.clear();
+        plan.attemptedRecoveryMethods.addAll(updated.attemptedMethods());
+        markDirty(bot);
+        return true;
+    }
+
+    public int remainingRecoveryAttempts(AIPlayerEntity bot) {
+        ActivePlan plan = activePlans.get(bot.getUuid());
+        return plan == null ? 0 : Math.max(
+                0, MissionRecord.RECOVERY_ATTEMPT_LIMIT - plan.recoveryAttemptsUsed);
     }
 
     public void restoreRuntime(AIPlayerEntity bot, MissionRuntimeRecord runtime) {
@@ -2299,6 +2341,7 @@ public final class GoalExecutor {
         checkpoint.put("rare_epoch_margin_used", String.valueOf(
                 active.rareEpochMarginUsed));
         checkpoint.put("replan_count", String.valueOf(active.replanCount));
+        checkpoint.putAll(encodeMissionRecoveryCheckpoint(active));
         checkpoint.putAll(encodePostconditionRepairCheckpoint(
                 active.postconditionReplans,
                 active.lastEvaluationMatched,
@@ -2363,6 +2406,71 @@ public final class GoalExecutor {
             }
         }
         return Map.copyOf(checkpoint);
+    }
+
+    private static Map<String, String> encodeMissionRecoveryCheckpoint(ActivePlan active) {
+        return MissionRecord.encodeRecoveryState(missionRecoveryState(active));
+    }
+
+    private static MissionRecord.RecoveryState missionRecoveryState(ActivePlan active) {
+        return new MissionRecord.RecoveryState(active.missionProgressRevision,
+                active.snapMissionProgressRevision, active.missionExplorationHighWater,
+                Map.copyOf(active.missionItemHighWater), active.recoveryAttemptsUsed,
+                Set.copyOf(active.attemptedRecoveryMethods));
+    }
+
+    private static void registerMissionItems(
+            AIPlayerEntity bot, ActivePlan plan, List<GoalStep> steps) {
+        Set<net.minecraft.item.Item> items = new java.util.HashSet<>();
+        goalTargetItem(plan.goal).ifPresent(items::add);
+        for (GoalStep step : steps) {
+            if (step.item() != null) items.add(step.item());
+            if (step.input() != null) items.add(step.input());
+            if (step.output() != null) items.add(step.output());
+            if (step.kind() == GoalStep.Kind.HUNT) {
+                items.addAll(Set.of(Items.BEEF, Items.PORKCHOP, Items.CHICKEN,
+                        Items.MUTTON, Items.RABBIT));
+            }
+        }
+        for (net.minecraft.item.Item item : items) {
+            String itemId = net.minecraft.registry.Registries.ITEM.getId(item).toString();
+            plan.missionItemHighWater.putIfAbsent(itemId,
+                    io.github.zoyluo.aibot.action.InventoryAction.countItem(bot, item));
+        }
+    }
+
+    private static Optional<net.minecraft.item.Item> goalTargetItem(Goal goal) {
+        return switch (goal) {
+            case Goal.HaveItem value -> Optional.of(value.item());
+            case Goal.Stockpile value -> Optional.of(value.item());
+            case Goal.HarvestCrop value -> Optional.of(value.produce());
+            default -> Optional.empty();
+        };
+    }
+
+    private static void observeMissionProgress(AIPlayerEntity bot, ActivePlan plan) {
+        MissionRecord.RecoveryState state = missionRecoveryState(plan);
+        for (Map.Entry<String, Integer> entry : state.itemHighWater().entrySet()) {
+            net.minecraft.util.Identifier id = net.minecraft.util.Identifier.of(entry.getKey());
+            net.minecraft.item.Item item = net.minecraft.registry.Registries.ITEM
+                    .getOptionalValue(id).orElse(null);
+            if (item != null) {
+                int observed = io.github.zoyluo.aibot.action.InventoryAction.countItem(bot, item);
+                state = MissionRecord.observeRelevantItem(state, entry.getKey(), observed);
+            }
+        }
+        int explored = plan.huntSearchCursor.visitedCount();
+        if (explored > state.explorationHighWater()) {
+            plan.missionExplorationHighWater = explored;
+            long revision = state.progressRevision() == Long.MAX_VALUE
+                    ? Long.MAX_VALUE : state.progressRevision() + 1;
+            state = new MissionRecord.RecoveryState(revision, state.snapProgressRevision(),
+                    explored, state.itemHighWater(), state.attemptsUsed(), state.attemptedMethods());
+        }
+        plan.missionProgressRevision = state.progressRevision();
+        plan.missionExplorationHighWater = state.explorationHighWater();
+        plan.missionItemHighWater.clear();
+        plan.missionItemHighWater.putAll(state.itemHighWater());
     }
 
     static Map<String, String> encodeHuntSearchCursorNamespace(HuntSearchCursor cursor) {
@@ -2702,6 +2810,8 @@ public final class GoalExecutor {
                 decodeSkippedTargetReceipts(checkpoint);
         Optional<PostconditionRepairCheckpoint> postconditionRepair =
                 decodePostconditionRepairCheckpoint(checkpoint);
+        Optional<MissionRecord.RecoveryState> missionRecovery =
+                MissionRecord.decodeRecoveryState(checkpoint);
         GoalSnapshotCollector.Context fallback = initialContext(bot, goal);
         BlockPos origin = decodePos(checkpoint.get("origin")).orElse(fallback.origin());
         Set<BlockPos> containers = new HashSet<>();
@@ -2796,7 +2906,13 @@ public final class GoalExecutor {
                 decodePersistedCapacityParentServicesUsed(checkpoint).orElse(-1),
                 checkpoint.getOrDefault(AUXILIARY_MINING_CONTINUATION_KEY, ""),
                 Map.copyOf(obsidianCheckpoint),
-                Map.copyOf(settledServiceTombstone));
+                Map.copyOf(settledServiceTombstone),
+                missionRecovery.map(MissionRecord.RecoveryState::progressRevision).orElse(0L),
+                missionRecovery.map(MissionRecord.RecoveryState::snapProgressRevision).orElse(0L),
+                missionRecovery.map(MissionRecord.RecoveryState::explorationHighWater).orElse(0),
+                missionRecovery.map(MissionRecord.RecoveryState::itemHighWater).orElse(Map.of()),
+                missionRecovery.map(MissionRecord.RecoveryState::attemptsUsed).orElse(0),
+                missionRecovery.map(MissionRecord.RecoveryState::attemptedMethods).orElse(Set.of()));
     }
 
     /**
@@ -2841,6 +2957,9 @@ public final class GoalExecutor {
         }
         if (decodePostconditionRepairCheckpoint(values).isEmpty()) {
             return Optional.of("mission_restore_invalid_postcondition_repair_checkpoint");
+        }
+        if (MissionRecord.decodeRecoveryState(values).isEmpty()) {
+            return Optional.of("mission_restore_invalid_mission_recovery_checkpoint");
         }
         return Optional.empty();
     }
@@ -3363,34 +3482,23 @@ public final class GoalExecutor {
     }
 
     /**
-     * Pure replan-watermark policy. Goal output and completed steps are universal progress.
-     * HUNT then accepts only factual food/search gains; all other tasks retain the existing
-     * controlled movement signal used by branch mining.
+     * Pure replan-watermark policy for facts local to the original Goal's postcondition/search.
+     * Prerequisite inventory is tracked by the mission high-water namespace below.
      */
     static boolean madeReplanProgress(
             GoalStep.Kind kind,
-            int completedSteps, int snapshotSteps,
             int targetCount, int snapshotTargetCount,
-            int huntRawMeat, int snapshotHuntRawMeat,
-            int huntVisitedSectors, int snapshotHuntVisitedSectors,
-            String dimension, String snapshotDimension,
-            int x, int y, int z,
-            int snapshotX, int snapshotY, int snapshotZ) {
-        if (completedSteps > snapshotSteps || targetCount > snapshotTargetCount) {
-            return true;
-        }
-        if (kind == GoalStep.Kind.HUNT) {
-            return huntRawMeat > snapshotHuntRawMeat
-                    || huntVisitedSectors > snapshotHuntVisitedSectors;
-        }
-        if (dimension == null || dimension.isBlank()
-                || snapshotDimension == null || snapshotDimension.isBlank()
-                || !dimension.equals(snapshotDimension)) {
-            return false;
-        }
-        long dx = (long) x - snapshotX;
-        long dz = (long) z - snapshotZ;
-        return y < snapshotY || dx * dx + dz * dz >= 64L;
+            int huntVisitedSectors, int snapshotHuntVisitedSectors) {
+        // Child task completion, travel and display state are not original-mission milestones.
+        // HUNT's durable cursor is the one existing exploration receipt; target output is always
+        // relevant to the immutable top-level postcondition.
+        return targetCount > snapshotTargetCount
+                || kind == GoalStep.Kind.HUNT
+                && huntVisitedSectors > snapshotHuntVisitedSectors;
+    }
+
+    static boolean missionProgressAdvanced(long currentRevision, long snapshotRevision) {
+        return currentRevision > snapshotRevision;
     }
 
     /**
@@ -3873,15 +3981,12 @@ public final class GoalExecutor {
         int currentHuntVisitedSectors = plan.huntSearchCursor.visitedCount();
         String currentDimension = bot.getServerWorld().getRegistryKey()
                 .getValue().toString();
-        boolean madeProgress = madeReplanProgress(
+        observeMissionProgress(bot, plan);
+        boolean madeProgress = missionProgressAdvanced(plan.missionProgressRevision,
+                plan.snapMissionProgressRevision) || madeReplanProgress(
                 plan.current == null ? null : plan.current.kind(),
-                plan.completedSteps, plan.snapSteps,
                 curTarget, plan.snapTargetCount,
-                currentHuntRawMeat, plan.snapHuntRawMeat,
-                currentHuntVisitedSectors, plan.snapHuntVisitedSectors,
-                currentDimension, plan.snapDimension,
-                bp.getX(), bp.getY(), bp.getZ(),
-                plan.snapX, plan.snapY, plan.snapZ);
+                currentHuntVisitedSectors, plan.snapHuntVisitedSectors);
         if (madeProgress) {
             plan.replanCount = 0; // 进展赦免
         }
@@ -3893,6 +3998,7 @@ public final class GoalExecutor {
         plan.snapDimension = currentDimension;
         plan.snapHuntRawMeat = currentHuntRawMeat;
         plan.snapHuntVisitedSectors = currentHuntVisitedSectors;
+        plan.snapMissionProgressRevision = plan.missionProgressRevision;
         // 死亡闸:连续 3 次无进展 replan，或耗尽与原始长配额批次数绑定的终生预算，
         // 或 replan 关闭 → 判死。计数在闸后递增，因此上限表示实际允许的 replan 次数。
         if (!withinReplanBudget(plan.goal, plan.replanCount, plan.lifetimeReplans)
@@ -4065,6 +4171,7 @@ public final class GoalExecutor {
         }
         plan.steps.clear();
         plan.steps.addAll(replanned);
+        registerMissionItems(bot, plan, replanned);
         plan.totalSteps = replanned.size();
         plan.current = null;
         plan.currentTask = null;
@@ -5599,6 +5706,12 @@ public final class GoalExecutor {
         private String snapDimension = "";
         private int snapHuntRawMeat;
         private int snapHuntVisitedSectors;
+        private long missionProgressRevision;
+        private long snapMissionProgressRevision;
+        private int missionExplorationHighWater;
+        private final Map<String, Integer> missionItemHighWater = new java.util.TreeMap<>();
+        private int recoveryAttemptsUsed;
+        private final Set<String> attemptedRecoveryMethods = new java.util.TreeSet<>();
         /** Mission-scoped surface search facts shared by every HUNT task and replan. */
         private final HuntSearchCursor huntSearchCursor;
         /** Synthetic restore step that settles one durable PICKUP before any live replan. */
@@ -6116,7 +6229,13 @@ public final class GoalExecutor {
                                int capacityParentServicesUsed,
                                String auxiliaryMiningContinuationFingerprint,
                                Map<String, String> obsidianCheckpoint,
-                               Map<String, String> settledServiceTombstone) {
+                               Map<String, String> settledServiceTombstone,
+                               long missionProgressRevision,
+                               long snapMissionProgressRevision,
+                               int missionExplorationHighWater,
+                               Map<String, Integer> missionItemHighWater,
+                               int recoveryAttemptsUsed,
+                               Set<String> attemptedRecoveryMethods) {
     }
 
     private enum CapacityParentNamespace {
