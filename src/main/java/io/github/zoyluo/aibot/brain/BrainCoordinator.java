@@ -13,6 +13,9 @@ import io.github.zoyluo.aibot.perception.PerceptionSnapshot;
 import io.github.zoyluo.aibot.task.MemoryStore;
 import io.github.zoyluo.aibot.task.TaskManager;
 import io.github.zoyluo.aibot.task.TaskStatus;
+import io.github.zoyluo.aibot.goal.Goal;
+import io.github.zoyluo.aibot.action.FarmAction;
+import com.google.gson.JsonObject;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -23,16 +26,25 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.Optional;
+import java.util.Set;
+import java.util.function.Consumer;
+import net.minecraft.block.Blocks;
+import net.minecraft.item.Items;
 
 public final class BrainCoordinator {
     public static final BrainCoordinator INSTANCE = new BrainCoordinator();
     private static final int MAX_CONTINUATION_TASK_POLLS = 80;
+    private static final int MISSION_RECOVERY_TIMEOUT_SECONDS = 60;
 
     private final Map<UUID, BotConversation> conversations = new ConcurrentHashMap<>();
     private final Map<UUID, Boolean> manualModes = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> nextGoalWakeTick = new ConcurrentHashMap<>();
     // FLOW-2:大脑分配长任务后置 true;任务结束后 idle-watcher 据此自动唤醒大脑决定下一步(无需人催)。
     private final Map<UUID, Boolean> awaitingTask = new ConcurrentHashMap<>();
+    private final Map<UUID, RecoveryDecision> recoveryDecisions = new ConcurrentHashMap<>();
+    private static final Set<String> RECOVERY_TOOL_NAMES = Set.of(
+            "achieve_goal", "mine_ore", "harvest_crop", "provision_food");
     private ToolRegistry toolRegistry = new ToolRegistry();
     private ActionDispatcher dispatcher = new ActionDispatcher(toolRegistry);
     private AsyncDecisionExecutor executor;
@@ -41,6 +53,11 @@ public final class BrainCoordinator {
     }
 
     public void configure(AIBotConfig config) {
+        recoveryDecisions.values().forEach(pending -> {
+            pending.session().invalidate();
+            pending.onCancel().run();
+        });
+        recoveryDecisions.clear();
         conversations.values().forEach(conversation -> conversation.decision.invalidate());
         if (executor != null) {
             executor.shutdown();
@@ -218,6 +235,7 @@ public final class BrainCoordinator {
     }
 
     public void reset(AIPlayerEntity bot) {
+        cancelMissionRecovery(bot);
         BotConversation conversation = conversations.remove(bot.getUuid());
         if (conversation != null) {
             conversation.decision.invalidate();
@@ -231,6 +249,7 @@ public final class BrainCoordinator {
 
     /** Invalidates only the asynchronous decision; P0-02 owns full Mission/Task cancellation. */
     public boolean invalidateDecision(AIPlayerEntity bot, String reason) {
+        cancelMissionRecovery(bot);
         BotConversation conversation = conversations.get(bot.getUuid());
         if (conversation == null || !conversation.decision.invalidateIfBusy()) {
             return false;
@@ -238,6 +257,123 @@ public final class BrainCoordinator {
         BotLog.comm(bot, "decision_invalidated", "reason", reason);
         return true;
     }
+
+    /**
+     * Requests one constrained recovery proposal without superseding the user's conversation
+     * lease. Tool handlers are never executed here; the response is parsed into a typed Goal and
+     * the owning Mission validates and schedules it.
+     */
+    public void requestMissionRecovery(AIPlayerEntity bot,
+                                       String recoveryContext,
+                                       Consumer<Optional<Goal>> callback,
+                                       Runnable onCancel) {
+        ensureConfigured();
+        cancelMissionRecovery(bot);
+        DecisionSession session = new DecisionSession(bot.getUuid());
+        DecisionLease lease = session.beginEpoch();
+        RecoveryDecision pending = new RecoveryDecision(session, onCancel);
+        recoveryDecisions.put(bot.getUuid(), pending);
+        try {
+            PerceptionSnapshot snapshot = PerceptionCollector.collect(bot);
+            List<ChatMessage> messages = List.of(
+                    ChatMessage.system("You propose exactly one safe, high-level Minecraft recovery action. "
+                            + "Do not claim completion. An unobserved resource is unknown, not absent. "
+                            + "Never bypass a capability or permission denial. Use exactly one available tool."),
+                    ChatMessage.user("Mission recovery evidence:\n" + recoveryContext
+                            + "\nCurrent visible observation (incomplete):\n" + snapshot.toJson()));
+            List<ToolDefinition> tools = RECOVERY_TOOL_NAMES.stream()
+                    .filter(name -> ToolRegistry.publishTool(AIBotConfig.get().profile(), name))
+                    .map(name -> toolRegistry.get(name).orElse(null))
+                    .filter(java.util.Objects::nonNull)
+                    .toList();
+            executor.submit(bot, lease, messages, tools,
+                    (responseLease, response) -> {
+                        if (!session.tryAcceptResponse(responseLease)
+                                || !recoveryDecisions.remove(bot.getUuid(), pending)) {
+                            logStaleDecision(responseLease, "mission_recovery_response");
+                            return;
+                        }
+                        session.complete(responseLease);
+                        callback.accept(parseRecoveryProposal(response));
+                    },
+                    (errorLease, throwable) -> {
+                        if (!session.tryAcceptError(errorLease)
+                                || !recoveryDecisions.remove(bot.getUuid(), pending)) {
+                            logStaleDecision(errorLease, "mission_recovery_error");
+                            return;
+                        }
+                        BotLog.error(bot, "mission_recovery_request_failed", throwable);
+                        callback.accept(Optional.empty());
+                    });
+            CompletableFuture.delayedExecutor(MISSION_RECOVERY_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                    .execute(() -> bot.getServer().execute(() -> {
+                        if (recoveryDecisions.remove(bot.getUuid(), pending)) {
+                            session.invalidate();
+                            BotLog.warn(LogCategory.COMM, bot, "mission_recovery_timeout",
+                                    "seconds", MISSION_RECOVERY_TIMEOUT_SECONDS);
+                            callback.accept(Optional.empty());
+                        }
+                    }));
+        } catch (RuntimeException exception) {
+            recoveryDecisions.remove(bot.getUuid(), pending);
+            session.invalidate();
+            BotLog.error(bot, "mission_recovery_prepare_failed", exception);
+            callback.accept(Optional.empty());
+        }
+    }
+
+    public void cancelMissionRecovery(AIPlayerEntity bot) {
+        if (bot == null) return;
+        RecoveryDecision pending = recoveryDecisions.remove(bot.getUuid());
+        if (pending != null) {
+            pending.session().invalidate();
+            pending.onCancel().run();
+        }
+    }
+
+    public static Optional<Goal> parseRecoveryProposal(ChatResponse response) {
+        if (response == null || !response.wantsToolCalls() || response.toolCalls().size() != 1) {
+            return Optional.empty();
+        }
+        ChatToolCall call = response.toolCalls().getFirst();
+        JsonObject args = call.parsedArguments();
+        try {
+            return switch (call.name()) {
+                case "achieve_goal" -> {
+                    if (!args.has("item") || !args.get("item").isJsonPrimitive()) yield Optional.empty();
+                    var item = net.minecraft.registry.Registries.ITEM.get(
+                            net.minecraft.util.Identifier.of(args.get("item").getAsString()));
+                    if (item == Items.AIR) yield Optional.empty();
+                    yield Optional.of(new Goal.HaveItem(item, boundedCount(args, 1)));
+                }
+                case "mine_ore" -> {
+                    if (!args.has("ore") || !args.get("ore").isJsonPrimitive()) yield Optional.empty();
+                    yield Optional.of(new Goal.MineOre(ToolRegistry.oreTargetsFrom(
+                            args.get("ore").getAsString()), boundedCount(args, 1)));
+                }
+                case "harvest_crop" -> {
+                    if (!args.has("crop") || !args.get("crop").isJsonPrimitive()) yield Optional.empty();
+                    FarmAction.CropSpec crop = FarmAction.cropSpec(args.get("crop").getAsString());
+                    var produce = crop.crop() == Blocks.WHEAT ? Items.WHEAT : crop.seed();
+                    yield Optional.of(new Goal.HarvestCrop(crop.crop(), crop.seed(), produce,
+                            boundedCount(args, 1)));
+                }
+                case "provision_food" -> Optional.of(new Goal.Food(boundedCount(args, 4)));
+                default -> Optional.empty();
+            };
+        } catch (RuntimeException invalidProposal) {
+            return Optional.empty();
+        }
+    }
+
+    private static int boundedCount(JsonObject args, int fallback) {
+        int count = args.has("count") && args.get("count").isJsonPrimitive()
+                ? args.get("count").getAsInt() : fallback;
+        if (count < 1 || count > 64) throw new IllegalArgumentException("invalid_recovery_count");
+        return count;
+    }
+
+    private record RecoveryDecision(DecisionSession session, Runnable onCancel) { }
 
     public boolean clearIntentWakeSources(AIPlayerEntity bot) {
         boolean awaitingCleared = awaitingTask.remove(bot.getUuid()) != null;

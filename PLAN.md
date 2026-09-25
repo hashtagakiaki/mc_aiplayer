@@ -128,7 +128,7 @@ Full verification:
   - Verify: 往復、A→B→A、前提条件の実取得後の再試行、再起動後の予算維持、cancel/replaceの永続化境界を固定fixtureと `bash scripts/persistence_restart_test.sh` で確認。
   - Expected: 原目標が前進したかと同じ試行の反復をModが決定でき、再起動で上限を洗い流さない。
   - Commit: `feat: retain mission progress and retry budget`。
-- Wave 3, Task 1: 失敗を一段のmission recoveryへ接続する。
+- [x] Wave 3, Task 1: 失敗を一段のmission recoveryへ接続する。
   - Writes: `src/main/java/io/github/zoyluo/aibot/goal/GoalExecutor.java`, `src/main/java/io/github/zoyluo/aibot/brain/BrainCoordinator.java`, `DecisionSession.java`, 必要なら `CodexAppServerClient.java`/固定応答テスト。
   - Reads: Wave 2の実績/予算、`GoalPlanner.java`, `ToolRegistry.java`, `MissionRecord.java`, `GoalExecutor.submit`の保護規則。
   - Change: 失敗理由・未達条件・前後の実績・観測済み候補・試行済み手段を一つの復旧要求にし、GoalExecutorが元Missionのauthorityを保持してLLMへ一案のみ問い合わせる。提案をModが検証し、既存typed Goal/Taskとして一段だけ実行する。補助手順後は原目標をfresh stateから再評価する。
@@ -173,3 +173,11 @@ Full verification:
 - Focused 17 JUnit tests passed; `./gradlew test`, `./gradlew compileGametestJava`, and `bash scripts/persistence_restart_test.sh` passed. The restart script result is under `build/persistence-restart/20260925T041450Z-193728-13118`.
 - `./gradlew runGameTest` executed 595 cases: the new lifecycle case passed and the only failure was the same baseline `haveItemSurvivesDeathRecoveryAndPreservesQueuedMineOre` (`missing result for resumed mission`). `git diff --check` passed. No production server, jar, configuration, or world was changed.
 - 2026-09-25: Wave 2 Task 2 implemented by gpt-6-luna; verification and the existing full GameTest failure are recorded above.
+
+### Wave 3 Task 1 evidence
+
+- `GoalExecutor` now requests one recovery proposal only after the deterministic replan is unavailable/exhausted or repeats a hard-failed step. Existing strict-survival, permission, physical-debt, and invalid-checkpoint failures stay fail-closed. The request includes the original goal, unmet condition, progress and prerequisite high-water, tried methods, and explicit unknown-resource/permission policy.
+- `BrainCoordinator` uses a separate 60-second one-shot `DecisionSession`; normal conversation leases remain independent. Only one of four published high-level goal tools is parsed into a typed Goal; handlers are not run from the response. The original ActivePlan/Mission ID stays authoritative, the proposal is checked against the durable three-attempt ledger, and the original goal is freshly planned after the auxiliary step. Auxiliary failure is terminal and cannot recursively request recovery.
+- Cancel/reset/config invalidation clears the pending request only when Mission and request IDs match; a late response is discarded. Ordinary new user messages preserve ongoing Mission behavior. Fixed-response GameTests cover typed parsing, same-Mission recovery, already-satisfied proposal resume, and cancel/pending/late-response behavior. A JUnit fixture checks permission/unknown classification.
+- `./gradlew test compileGametestJava` passed. Final `./gradlew runGameTest` executed 598 cases: all three new recovery cases passed; only the existing `DeathRecoveryMissionGameTests.haveItemSurvivesDeathRecoveryAndPreservesQueuedMineOre` baseline failed (`missing result for resumed mission`). XML: `build/test-results/gametest/TEST-aibot-gametest.xml`. `git diff --check` passed.
+- 2026-09-25: Wave 3 Task 1 implemented by gpt-6-luna. The fixed response is validated at parser/lease and Mission handoff boundaries; the test does not replace the HTTP transport. Pending auxiliary-stage restoration across a process restart remains for Wave 4 integration review.

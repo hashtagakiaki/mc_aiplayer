@@ -1,6 +1,9 @@
 package io.github.zoyluo.aibot.goal;
 
 import io.github.zoyluo.aibot.action.InventoryAction;
+import io.github.zoyluo.aibot.brain.BrainCoordinator;
+import io.github.zoyluo.aibot.brain.DecisionLease;
+import io.github.zoyluo.aibot.brain.DecisionSession;
 import io.github.zoyluo.aibot.entity.AIPlayerEntity;
 import io.github.zoyluo.aibot.manager.AIPlayerManager;
 import io.github.zoyluo.aibot.persist.MissionRuntimeRecord;
@@ -23,6 +26,9 @@ import net.minecraft.world.GameMode;
 
 import java.util.Set;
 import java.util.UUID;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.util.Map;
 
 /** Deterministic death suspension coverage for active and queued mining missions. */
 public final class DeathRecoveryMissionGameTests implements FabricGameTest {
@@ -95,6 +101,130 @@ public final class DeathRecoveryMissionGameTests implements FabricGameTest {
         GoalExecutor.INSTANCE.cancelAll(bot);
         AIPlayerManager.INSTANCE.despawn(world.getServer(), botName);
         context.complete();
+    }
+
+    @GameTest(templateName = FabricGameTest.EMPTY_STRUCTURE, tickLimit = 30)
+    public void satisfiedRecoveryProposalResumesOriginalMissionUnderSameIdentity(TestContext context) {
+        String botName = "MissionRecoveryGT";
+        var world = context.getWorld();
+        BlockPos cell = context.getAbsolutePos(new BlockPos(1, 2, 1));
+        prepareCell(world, cell);
+        AIPlayerEntity bot = AIPlayerManager.INSTANCE.spawn(
+                        world.getServer(), botName, world, Vec3d.ofBottomCenter(cell),
+                        0.0F, 0.0F, GameMode.SURVIVAL)
+                .orElseThrow(() -> new IllegalStateException("failed to spawn " + botName));
+        Goal original = new Goal.HaveItem(Items.IRON_INGOT, 1);
+        Goal alreadySatisfied = new Goal.HaveItem(Items.SWEET_BERRIES, 1);
+        InventoryAction.giveItem(bot, new ItemStack(Items.SWEET_BERRIES, 1));
+        require(context, GoalExecutor.INSTANCE.submit(bot, original), "original mission submit failed");
+        MissionRuntimeRecord before = GoalExecutor.INSTANCE.captureRuntime(bot);
+        UUID missionId = UUID.fromString(before.active().missionId());
+
+        require(context, GoalExecutor.INSTANCE.applyMissionRecoveryProposal(
+                        bot, missionId, alreadySatisfied, "missing_iron|no_resource_nearby",
+                        "no_resource_nearby: unobserved") ,
+                "fixed auxiliary proposal was not accepted");
+        MissionRuntimeRecord after = GoalExecutor.INSTANCE.captureRuntime(bot);
+        require(context, after.active() != null, "recovery discarded the original mission");
+        require(context, after.active().missionId().equals(missionId.toString()),
+                "recovery allocated a new mission identity");
+        require(context, after.active().spec().toGoal().orElseThrow().equals(original),
+                "recovery replaced the original goal with the auxiliary proposal");
+        require(context, GoalExecutor.INSTANCE.remainingRecoveryAttempts(bot) == 2,
+                "accepted recovery proposal did not consume one bounded attempt");
+        GoalExecutor.INSTANCE.cancelAll(bot);
+        AIPlayerManager.INSTANCE.despawn(world.getServer(), botName);
+        context.complete();
+    }
+
+    @GameTest(templateName = FabricGameTest.EMPTY_STRUCTURE, tickLimit = 30)
+    public void cancellingRecoveryLeaseReleasesPendingMissionAndRejectsLateResponse(TestContext context) {
+        String botName = "MissionRecoveryCancelGT";
+        var world = context.getWorld();
+        BlockPos cell = context.getAbsolutePos(new BlockPos(1, 2, 1));
+        prepareCell(world, cell);
+        AIPlayerEntity bot = AIPlayerManager.INSTANCE.spawn(
+                        world.getServer(), botName, world, Vec3d.ofBottomCenter(cell),
+                        0.0F, 0.0F, GameMode.SURVIVAL)
+                .orElseThrow(() -> new IllegalStateException("failed to spawn " + botName));
+        require(context, GoalExecutor.INSTANCE.submit(
+                        bot, new Goal.HaveItem(Items.IRON_INGOT, 1)),
+                "mission submit failed");
+        UUID missionId = UUID.fromString(
+                GoalExecutor.INSTANCE.captureRuntime(bot).active().missionId());
+        UUID requestId = UUID.randomUUID();
+        Object active = activePlanForTest(bot);
+        setField(active, "recoveryPending", true);
+        setField(active, "recoveryRequestId", requestId);
+
+        DecisionSession session = new DecisionSession(bot.getUuid());
+        DecisionLease delayed = session.beginEpoch();
+        Runnable releasePending = () -> GoalExecutor.INSTANCE.abandonMissionRecovery(
+                bot, missionId, requestId);
+        registerRecoveryDecisionForTest(bot, session, releasePending);
+        BrainCoordinator.INSTANCE.cancelMissionRecovery(bot);
+
+        require(context, !((boolean) getField(active, "recoveryPending")),
+                "cancellation left the original mission pending forever");
+        require(context, getField(active, "recoveryRequestId") == null,
+                "cancellation retained the stale request identity");
+        require(context, (boolean) getField(active, "recoveryCancelled"),
+                "cancellation did not suppress an immediate duplicate LLM request");
+        require(context, !session.tryAcceptResponse(delayed),
+                "late response from the cancelled recovery lease was accepted");
+
+        GoalExecutor.INSTANCE.cancelAll(bot);
+        AIPlayerManager.INSTANCE.despawn(world.getServer(), botName);
+        context.complete();
+    }
+
+    private static Object activePlanForTest(AIPlayerEntity bot) {
+        try {
+            Field field = GoalExecutor.class.getDeclaredField("activePlans");
+            field.setAccessible(true);
+            return ((Map<?, ?>) field.get(GoalExecutor.INSTANCE)).get(bot.getUuid());
+        } catch (ReflectiveOperationException exception) {
+            throw new IllegalStateException(exception);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void registerRecoveryDecisionForTest(AIPlayerEntity bot,
+                                                        DecisionSession session,
+                                                        Runnable onCancel) {
+        try {
+            Class<?> type = Class.forName(
+                    "io.github.zoyluo.aibot.brain.BrainCoordinator$RecoveryDecision");
+            Constructor<?> constructor = type.getDeclaredConstructor(
+                    DecisionSession.class, Runnable.class);
+            constructor.setAccessible(true);
+            Object pending = constructor.newInstance(session, onCancel);
+            Field field = BrainCoordinator.class.getDeclaredField("recoveryDecisions");
+            field.setAccessible(true);
+            ((Map<UUID, Object>) field.get(BrainCoordinator.INSTANCE)).put(bot.getUuid(), pending);
+        } catch (ReflectiveOperationException exception) {
+            throw new IllegalStateException(exception);
+        }
+    }
+
+    private static Object getField(Object target, String name) {
+        try {
+            Field field = target.getClass().getDeclaredField(name);
+            field.setAccessible(true);
+            return field.get(target);
+        } catch (ReflectiveOperationException exception) {
+            throw new IllegalStateException(exception);
+        }
+    }
+
+    private static void setField(Object target, String name, Object value) {
+        try {
+            Field field = target.getClass().getDeclaredField(name);
+            field.setAccessible(true);
+            field.set(target, value);
+        } catch (ReflectiveOperationException exception) {
+            throw new IllegalStateException(exception);
+        }
     }
 
     private static void runScenario(TestContext context,

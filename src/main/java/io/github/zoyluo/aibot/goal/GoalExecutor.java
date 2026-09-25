@@ -2,6 +2,7 @@ package io.github.zoyluo.aibot.goal;
 
 import io.github.zoyluo.aibot.AIBotConfig;
 import io.github.zoyluo.aibot.brain.BotReporter;
+import io.github.zoyluo.aibot.brain.BrainCoordinator;
 import io.github.zoyluo.aibot.entity.AIPlayerEntity;
 import io.github.zoyluo.aibot.log.BotLog;
 import io.github.zoyluo.aibot.mining.MiningBudget;
@@ -1901,6 +1902,7 @@ public final class GoalExecutor {
     }
 
     public boolean cancelCurrent(AIPlayerEntity bot, String reason) {
+        BrainCoordinator.INSTANCE.cancelMissionRecovery(bot);
         UUID uuid = bot.getUuid();
         ActivePlan active = activePlans.get(uuid);
         MissionRuntimeRecord suspended = deathSuspended.remove(uuid);
@@ -3361,6 +3363,25 @@ public final class GoalExecutor {
                 finishActive(bot, plan, evaluation, "postcondition_satisfied", false, true);
                 return;
             }
+            if (plan.recoveryStage) {
+                GoalPlanner.GoalPlan resumed = GoalPlanner.plan(
+                        bot, plan.goal, snapshotContext(plan), plan.missionId.toString());
+                if (!resumed.success() || resumed.steps().isEmpty()) {
+                    plan.recoveryStage = false;
+                    finishActive(bot, plan, evaluation,
+                            "original_goal_unavailable_after_recovery:"
+                                    + String.join(",", resumed.unresolved()),
+                            false, true, GoalResult.Status.FAILED);
+                    return;
+                }
+                plan.recoveryStage = false;
+                plan.steps.addAll(resumed.steps());
+                plan.totalSteps = resumed.steps().size();
+                BotLog.task(bot, "goal_recovery_original_resumed", "goal", plan.goal,
+                        "steps", resumed.steps());
+                captureTransitionAndAssignNext(bot, plan);
+                return;
+            }
             if (!(plan.goal instanceof Goal.Build) && bot.isAlive()
                     && withinPostconditionRepairBudget(plan.postconditionReplans)) {
                 GoalPlanner.GoalPlan fresh = GoalPlanner.plan(
@@ -3776,6 +3797,12 @@ public final class GoalExecutor {
     }
 
     private void handleStepFailure(MinecraftServer server, AIPlayerEntity bot, ActivePlan plan, String reason) {
+        if (plan.recoveryPending) return;
+        if (plan.recoveryStage) {
+            finishActive(bot, plan, evaluate(bot, plan),
+                    "recovery_action_failed:" + reason, false, true, GoalResult.Status.FAILED);
+            return;
+        }
         captureTaskEvidence(bot, plan);
         Optional<SettledServiceTombstone> replayGuard =
                 matchingSettledServiceGuard(bot, plan, reason);
@@ -4003,6 +4030,7 @@ public final class GoalExecutor {
         // 或 replan 关闭 → 判死。计数在闸后递增，因此上限表示实际允许的 replan 次数。
         if (!withinReplanBudget(plan.goal, plan.replanCount, plan.lifetimeReplans)
                 || !AIBotConfig.get().goal().replanOnFailureEnabled()) {
+            if (requestMissionRecovery(bot, plan, reason)) return;
             finishActive(bot, plan, evaluate(bot, plan), reason, false, true);
             return;
         }
@@ -4154,6 +4182,7 @@ public final class GoalExecutor {
                 "steps", replanned.stream().map(GoalStep::describe).toList(),
                 "unresolved", fresh.unresolved());
         if ((!fresh.success() && obsidianRestore.isEmpty() && !surfaceRecovery) || replanned.isEmpty()) {
+            if (requestMissionRecovery(bot, plan, reason)) return;
             finishActive(bot, plan, evaluate(bot, plan),
                     settledTerminalService.isPresent() ? reason
                             : preserveStuckReason(reason, fresh.success() ? "replan_empty"
@@ -4165,6 +4194,7 @@ public final class GoalExecutor {
         // 重试只会原样再失败一次(实测#9 的 replan 风暴根因)。直接判失败,交大脑/玩家换思路。
         if (plan.current != null && plan.current.equals(replanned.get(0))
                 && isHardFailure(reason) && !madeProgress) {
+            if (requestMissionRecovery(bot, plan, reason)) return;
             finishActive(bot, plan, evaluate(bot, plan),
                     preserveStuckReason(reason, "replan_same_step:" + reason), false, true);
             return;
@@ -4177,6 +4207,129 @@ public final class GoalExecutor {
         plan.currentTask = null;
         report(bot, "遇到问题,我重新规划了一次。");
         captureTransitionAndAssignNext(bot, plan);
+    }
+
+    private boolean requestMissionRecovery(AIPlayerEntity bot, ActivePlan plan, String reason) {
+        if (plan.recoveryCancelled) {
+            plan.recoveryCancelled = false;
+            return false;
+        }
+        if (plan.recoveryPending || plan.recoveryStage || remainingRecoveryAttempts(bot) <= 0
+                || !eligibleForMissionRecovery(reason)) return false;
+        UUID missionId = plan.missionId;
+        UUID requestId = UUID.randomUUID();
+        String condition = recoveryCondition(plan.goal, reason);
+        plan.recoveryPending = true;
+        plan.recoveryRequestId = requestId;
+        markDirty(bot);
+        String context = "original_goal=" + plan.goal
+                + "\nfailure=" + reason
+                + "\nunmet_condition=" + evaluate(bot, plan)
+                + "\nprogress_evidence_before=" + plan.snapMissionProgressRevision
+                + "\nprogress_evidence_now=" + plan.missionProgressRevision
+                + "\nrelevant_item_high_water=" + plan.missionItemHighWater
+                + "\nexploration_high_water=" + plan.missionExplorationHighWater
+                + "\ntried_recovery_methods=" + plan.attemptedRecoveryMethods
+                + "\nvisible_candidates=provided in the incomplete observation below"
+                + "\npermission_policy=DENIED/forbidden actions are final; never retry or bypass them"
+                + "\nunknown_policy=resources outside the observation are unknown, not absent"
+                + "\ncondition_key=" + condition;
+        BotLog.task(bot, "goal_recovery_requested", "mission_id", missionId,
+                "reason", reason, "remaining", remainingRecoveryAttempts(bot));
+        BrainCoordinator.INSTANCE.requestMissionRecovery(bot, context, proposal -> {
+            ActivePlan current = activePlans.get(bot.getUuid());
+            if (current == null || !current.missionId.equals(missionId)
+                    || !requestId.equals(current.recoveryRequestId)) return;
+            current.recoveryPending = false;
+            current.recoveryRequestId = null;
+            if (proposal.isEmpty()) {
+                finishActive(bot, current, evaluate(bot, current),
+                        "recovery_proposal_missing_or_unsupported:" + reason,
+                        false, true, GoalResult.Status.FAILED);
+                return;
+            }
+            applyMissionRecoveryProposal(bot, missionId, proposal.orElseThrow(), condition, reason);
+        }, () -> abandonMissionRecovery(bot, missionId, requestId));
+        return true;
+    }
+
+    public void abandonMissionRecovery(AIPlayerEntity bot, UUID missionId, UUID requestId) {
+        ActivePlan active = bot == null ? null : activePlans.get(bot.getUuid());
+        if (active == null || !active.missionId.equals(missionId)
+                || !requestId.equals(active.recoveryRequestId)) return;
+        active.recoveryPending = false;
+        active.recoveryRequestId = null;
+        active.recoveryCancelled = true;
+        markDirty(bot);
+    }
+
+    boolean applyMissionRecoveryProposal(AIPlayerEntity bot, UUID missionId,
+                                         Goal recoveryGoal, String condition, String reason) {
+        ActivePlan current = activePlans.get(bot.getUuid());
+        if (current == null || !current.missionId.equals(missionId)) return false;
+        MissionSpec spec = MissionSpec.fromGoal(recoveryGoal);
+        String method = spec.type() + ":" + new java.util.TreeMap<>(spec.params())
+                + ":" + spec.values();
+        if (recoveryGoal.equals(current.goal)
+                || !recordRecoveryAttempt(bot, condition, method)) {
+            finishActive(bot, current, evaluate(bot, current),
+                    "recovery_proposal_repeated_or_budget_exhausted:" + method,
+                    false, true, GoalResult.Status.FAILED);
+            return false;
+        }
+        GoalPlanner.GoalPlan auxiliary = GoalPlanner.plan(
+                bot, recoveryGoal, snapshotContext(current), current.missionId.toString());
+        if (!auxiliary.success()) {
+            finishActive(bot, current, evaluate(bot, current),
+                    "recovery_action_unavailable:" + String.join(",", auxiliary.unresolved()),
+                    false, true, GoalResult.Status.FAILED);
+            return false;
+        }
+        current.steps.clear();
+        current.current = null;
+        current.currentTask = null;
+        if (auxiliary.steps().isEmpty()) {
+            GoalPlanner.GoalPlan resumed = GoalPlanner.plan(
+                    bot, current.goal, snapshotContext(current), current.missionId.toString());
+            if (!resumed.success() || resumed.steps().isEmpty()) {
+                finishActive(bot, current, evaluate(bot, current),
+                        "original_goal_unavailable_after_recovery:"
+                                + String.join(",", resumed.unresolved()),
+                        false, true, GoalResult.Status.FAILED);
+                return false;
+            }
+            current.steps.addAll(resumed.steps());
+            current.totalSteps = resumed.steps().size();
+            registerMissionItems(bot, current, resumed.steps());
+            BotLog.task(bot, "goal_recovery_original_resumed", "goal", current.goal,
+                    "steps", resumed.steps());
+            captureTransitionAndAssignNext(bot, current);
+            return true;
+        }
+        current.steps.addAll(auxiliary.steps());
+        current.totalSteps = auxiliary.steps().size();
+        registerMissionItems(bot, current, auxiliary.steps());
+        current.recoveryStage = true;
+        report(bot, "原目标暂未完成，我先处理一个有界补助手段，再重新核对原目标。");
+        BotLog.task(bot, "goal_recovery_action_accepted", "goal", recoveryGoal,
+                "mission_id", current.missionId, "steps", auxiliary.steps());
+        captureTransitionAndAssignNext(bot, current);
+        return true;
+    }
+
+    static boolean eligibleForMissionRecovery(String reason) {
+        if (reason == null || reason.isBlank()) return false;
+        String normalized = reason.toLowerCase(java.util.Locale.ROOT);
+        return !(normalized.contains("denied_") || normalized.contains("permission_denied")
+                || normalized.contains("capability_denied") || normalized.contains("forbidden")
+                || normalized.contains("operator_only") || normalized.contains("strict_survival")
+                || normalized.contains("invalid_checkpoint") || normalized.contains("dimension_mismatch")
+                || normalized.contains("physical_debt") || normalized.contains("unsettled"));
+    }
+
+    private static String recoveryCondition(Goal goal, String reason) {
+        String value = goal + "|" + reason;
+        return value.length() <= 256 ? value : value.substring(0, 256);
     }
 
     private static Optional<MiningServiceTask.RestoreMetadata> settledTerminalServiceFailure(
@@ -5712,6 +5865,10 @@ public final class GoalExecutor {
         private final Map<String, Integer> missionItemHighWater = new java.util.TreeMap<>();
         private int recoveryAttemptsUsed;
         private final Set<String> attemptedRecoveryMethods = new java.util.TreeSet<>();
+        private boolean recoveryPending;
+        private boolean recoveryStage;
+        private boolean recoveryCancelled;
+        private UUID recoveryRequestId;
         /** Mission-scoped surface search facts shared by every HUNT task and replan. */
         private final HuntSearchCursor huntSearchCursor;
         /** Synthetic restore step that settles one durable PICKUP before any live replan. */

@@ -7,6 +7,7 @@ import io.github.zoyluo.aibot.entity.AIPlayerEntity;
 import io.github.zoyluo.aibot.manager.AIPlayerManager;
 import io.github.zoyluo.aibot.mining.OreScan;
 import io.github.zoyluo.aibot.runtime.IntentController;
+import io.github.zoyluo.aibot.goal.Goal;
 import io.github.zoyluo.aibot.runtime.TaskOrigin;
 import io.github.zoyluo.aibot.task.AbstractTask;
 import io.github.zoyluo.aibot.task.StripMineTask;
@@ -26,9 +27,30 @@ import net.minecraft.world.GameMode;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 /** Runtime registry coverage for the public mine_ore argument contract. */
 public final class ToolRegistryMiningGameTests implements FabricGameTest {
+    @GameTest(templateName = FabricGameTest.EMPTY_STRUCTURE, tickLimit = 20)
+    public void fixedRecoveryResponseIsTypedAndLateLeaseIsDiscarded(TestContext context) {
+        ChatResponse fixed = new ChatResponse("", List.of(new ChatToolCall(
+                "fixed", "mine_ore", "{\"ore\":\"minecraft:iron_ore\",\"count\":1}")),
+                "tool_calls", 0, 0, 0);
+        Goal proposed = BrainCoordinator.parseRecoveryProposal(fixed).orElseThrow();
+        if (!proposed.equals(new Goal.MineOre(ToolRegistry.oreTargetsFrom("minecraft:iron_ore"), 1))) {
+            context.throwGameTestException("fixed recovery proposal did not become the typed ore Goal");
+            return;
+        }
+        DecisionSession session = new DecisionSession(java.util.UUID.randomUUID());
+        DecisionLease delayed = session.beginEpoch();
+        session.invalidate();
+        if (session.tryAcceptResponse(delayed)) {
+            context.throwGameTestException("cancelled recovery response lease was accepted");
+            return;
+        }
+        context.complete();
+    }
+
     @GameTest(templateName = FabricGameTest.EMPTY_STRUCTURE, tickLimit = 20)
     public void aliasesResolveOnlyTheirRequestedOreFamily(TestContext context) {
         if (!OreScan.oreFamily(Blocks.DIAMOND_ORE)
