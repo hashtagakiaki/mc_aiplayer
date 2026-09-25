@@ -50,6 +50,8 @@ public final class CombatTask extends AbstractTask {
     private final BlockPos defensiveAnchor;
     private Phase phase = Phase.ACQUIRE;
     private LivingEntity target;
+    private LivingEntity observedHealthTarget;
+    private float observedTargetHealth;
     private int kills;
     private int repositionTicks;
     private int bowChargeTicks;
@@ -120,6 +122,7 @@ public final class CombatTask extends AbstractTask {
             }
             return;
         }
+        observeTargetDamage();
         if (!defensiveEngagementAllowed(bot)) {
             return;
         }
@@ -457,6 +460,7 @@ public final class CombatTask extends AbstractTask {
             retreatDestination = null;
         }
         kills++;
+        recordProgressEvidence();
         bot.stopUsingItem();
         eating = false;
 
@@ -475,6 +479,19 @@ public final class CombatTask extends AbstractTask {
             phase = Phase.ACQUIRE;
         }
         return true;
+    }
+
+    private void observeTargetDamage() {
+        if (target == null || !target.isAlive()) {
+            observedHealthTarget = null;
+            return;
+        }
+        float health = target.getHealth();
+        if (observedHealthTarget == target && health < observedTargetHealth) {
+            recordProgressEvidence();
+        }
+        observedHealthTarget = target;
+        observedTargetHealth = health;
     }
 
     private LivingEntity refreshRetreatThreat(AIPlayerEntity bot) {

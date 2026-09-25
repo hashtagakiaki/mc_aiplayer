@@ -241,6 +241,11 @@ public final class CreateObsidianTask extends AbstractTask implements Checkpoint
     }
 
     @Override
+    public WatchdogPolicy watchdogPolicy() {
+        return WatchdogPolicy.TASK_MANAGED; // Each search/approach/formation/recovery phase is bounded.
+    }
+
+    @Override
     protected void onStart(AIPlayerEntity bot) {
         if (invalidCheckpoint) {
             fail("create_obsidian_invalid_checkpoint");

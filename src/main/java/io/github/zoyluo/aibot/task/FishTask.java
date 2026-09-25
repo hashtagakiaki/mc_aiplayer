@@ -81,6 +81,11 @@ public final class FishTask extends AbstractTask {
     }
 
     @Override
+    public WatchdogPolicy watchdogPolicy() {
+        return WatchdogPolicy.TASK_MANAGED; // maxTicks bounds waiting for a bite.
+    }
+
+    @Override
     protected void onStart(AIPlayerEntity bot) {
         if (!equipRod(bot)) {
             fail("need_fishing_rod");

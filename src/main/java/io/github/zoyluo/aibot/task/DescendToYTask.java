@@ -304,6 +304,11 @@ public final class DescendToYTask extends AbstractTask implements Checkpointable
     }
 
     @Override
+    public WatchdogPolicy watchdogPolicy() {
+        return WatchdogPolicy.TASK_MANAGED; // Dedicated block-break no-progress and total budget guards.
+    }
+
+    @Override
     protected void onStart(AIPlayerEntity bot) {
         if (restoredCheckpoint == null) {
             budgetOffset = 0;

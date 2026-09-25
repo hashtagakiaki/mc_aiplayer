@@ -136,6 +136,12 @@ public final class SmeltTask extends AbstractTask {
     }
 
     @Override
+    public WatchdogPolicy watchdogPolicy() {
+        // The full operation has a target-count-based hard elapsed-time limit.
+        return WatchdogPolicy.TASK_MANAGED;
+    }
+
+    @Override
     protected void onStart(AIPlayerEntity bot) {
         phase = Phase.FINDING_FURNACE;
         furnaceCraftRequired = false;

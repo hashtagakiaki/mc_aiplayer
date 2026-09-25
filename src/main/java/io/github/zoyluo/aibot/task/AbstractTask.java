@@ -7,6 +7,7 @@ public abstract class AbstractTask implements Task {
     protected String failureReason = "";
     protected int elapsed;
     private int startedTick;
+    private long progressEvidence;
 
     @Override
     public final void start(AIPlayerEntity bot) {
@@ -82,6 +83,18 @@ public abstract class AbstractTask implements Task {
 
     public int startedTick() {
         return startedTick;
+    }
+
+    @Override
+    public final long progressEvidence() {
+        return progressEvidence;
+    }
+
+    /** Records one verified useful outcome without coupling it to a display progress fraction. */
+    protected final void recordProgressEvidence() {
+        if (progressEvidence < Long.MAX_VALUE) {
+            progressEvidence++;
+        }
     }
 
     protected void complete() {

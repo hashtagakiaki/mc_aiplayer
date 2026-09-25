@@ -24,6 +24,11 @@ public final class HoldTask extends AbstractTask {
     }
 
     @Override
+    public WatchdogPolicy watchdogPolicy() {
+        return WatchdogPolicy.INTENTIONALLY_ONGOING;
+    }
+
+    @Override
     protected void onStart(AIPlayerEntity bot) {
         bot.getActionPack().stopAll();
     }

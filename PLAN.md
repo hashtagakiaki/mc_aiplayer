@@ -113,13 +113,14 @@ Full verification:
 
 ## Deferred work
 
-- Wave 2, Task 1: タスク内の実績/待機根拠を統一する。
-  - Writes: `src/main/java/io/github/zoyluo/aibot/task/Task.java`, `StuckWatcher.java`, `MoveTask.java`, `GatherQuotaTask.java`, `OreDigTask.java`, `FarmTask.java`, `SmeltTask.java`; 対応する `src/test` または `src/gametest` の監視回帰テスト。
+- [x] Wave 2, Task 1: タスク内の実績/待機根拠を統一する。
+  - Writes: `src/main/java/io/github/zoyluo/aibot/task/Task.java`, `AbstractTask.java`, `StuckWatcher.java`, 全 concrete Task実装のtimeout/evidence policyと必要な成功イベント（現在確認済み: `MoveTask.java`, `GatherQuotaTask.java`, `OreDigTask.java`, `FarmTask.java`, `SmeltTask.java`, `HoldTask.java`, `GuardTask.java`, `FollowTask.java`, `FishTask.java`, `HuntTask.java`, `MiningBarricadeTask.java`, `AcquireWaterTask.java`, `RecoverDropsTask.java`, `BuildTask.java`, `SleepTask.java`, `DescendToYTask.java`, `CreeperDefenseTask.java`, `EmergencyShelterTask.java`, `MiningServiceTask.java`, `DigDownTask.java`, `CreateObsidianTask.java`, `MineTask.java`, `StripMineTask.java`, `CombatTask.java`, `BreedTask.java`, `StockpileTask.java`, `ResupplyTask.java`, `PlaceStationsTask.java`, `IrrigateTask.java`, `LightAreaTask.java`, `ContainerTask.java`, `TradeTask.java`, `RaidCropsTask.java`, `MilkCowTask.java`, `CraftTask.java`, `EatTask.java`, `EvadeTask.java`, `LavaEscapeTask.java`); 対応する `src/test` または `src/gametest` の監視回帰テストと必要なentrypoint登録、および `src/test/java/io/github/zoyluo/aibot/DeepSeekThinkingConfigTest.java` の古いconfig constructor呼び出し。
   - Reads: `BlockMiner.java`, `TaskManager.java`, 既存のtask-owned watchdogとtimeout実装。
-  - Change: `progress()`を判定根拠から外し、タスクが返す最小の実績変更と期限付き待機情報で既存監視窓を判定する。採掘/移動のタスク内watchdogは重複させない。有限taskで未対応の待機は無期限免除にしない。
+  - Change: `progress()`を判定根拠から外し、タスクが返す最小の実績変更と期限付き待機情報で既存監視窓を判定する。`isWaiting()`単独では監視を止めない。有限taskに自己監視を任せる場合は実在する有界watchdogを確認して明示し、無期限のユーザー指示タスクだけをongoingとして明示する。200tickをまたぐ正当な作業があるMine/StripMine/Combat/Breedは、実ブロック破壊・被害・給餌/繁殖成功だけを成果として記録する。採掘/移動のタスク内watchdogは重複させない。
   - Verify: 静止、座標往復、progress往復、無関係な在庫変化、実ブロック破壊の進展、掘削式移動、作物成熟待ち、精錬待ちを固定fixtureで比較し、`./gradlew test` と `./gradlew runGameTest`。
   - Expected: 見せかけの変化では監視が更新されず、taskが報告した実績か具体的な待機条件だけが次の判定を決める。正常な長時間作業を誤停止しない。
   - Commit: `fix: base task watchdog on useful outcomes`。
+  - Plan update: 全38 concrete Taskを監査する。isWaiting実装21種は各有限タスクの有界watchdogを確認してtask-managed policyを明示し、無期限ユーザー指示（Hold/Guard/Follow）だけをongoingとする。非waitのうち200tickを超える正当作業のあるMine/StripMine/Combat/Breedだけ成果イベントを追加。他の非wait Taskは無成果で監視窓を超えたらstuckにする。共通のprogress evidence counterはAbstractTaskに保持する。
 - Wave 2, Task 2: 原Mission単位の進捗と反復予算を保持する。
   - Writes: `src/main/java/io/github/zoyluo/aibot/goal/GoalExecutor.java`, `src/main/java/io/github/zoyluo/aibot/persist/MissionRecord.java`, `MissionRuntimeRecord.java`, `MissionSpec.java`, 対応するGoalExecutor/persistence tests。
   - Reads: Wave 2 Task 1の実績型、`EpisodeMemory.java`, `DecisionSession.java`, `scripts/persistence_restart_test.sh`。
@@ -153,3 +154,13 @@ Full verification:
 
 - 2026-09-25: Astraによるソース調査。資源依存の再計画は既に存在し、主な設計課題は進捗の根拠、既存のループ抑制と矛盾しないLLM復旧への移行、原目標と実行権限の維持と判明。全面的なplanner置換を除外した。
 - 2026-09-25: Wave 1の一時GameTestでStuckWatcherの座標/progress resetと無期限`isWaiting`免除を再現。初回probeの待機解除後のfixture自身のprogress振動を止め、対象のみ1/1成功。cleanup後のfull runは588件を実行し、既存`haveItemSurvivesDeathRecoveryAndPreservesQueuedMineOre`の`missing result for resumed mission` 1件のみでexit 1。再現したsuite失敗はWave 1の変更範囲外。
+
+### Wave 2 Task 1 evidence
+
+- `AbstractTask` now owns a saturating monotonic useful-outcome counter. `StuckWatcher` observes only evidence increases for `MONITOR_EVIDENCE`; position, `progress()`, and inventory totals no longer reset the shared window. `isWaiting()` no longer silently suspends it.
+- Audited all 38 concrete Task classes. All 21 `isWaiting()` implementations explicitly own a bounded watchdog (18) or explicit ongoing user intent (Hold/Guard/Follow, 3). The remaining 17 use the shared evidence window. Mine/StripMine/Combat/Breed record only verified long-running outcomes; observed immature crop waiting is bounded by Farm 12000-tick task deadline; actual Smelt furnace waiting is bounded by its target-count deadline.
+- Added six `TaskProgressWatchdogGameTests`: stationary finite wait with position/progress/inventory noise expires; Hold remains active; real mining break increments evidence exactly once; MoveTask clears and crosses a tunnel; observed immature crops and actual SMELTING phases remain protected by their finite owner deadlines. All 6 pass.
+- `./gradlew compileGametestJava` passed. `./gradlew test` initially exposed a stale `DeepSeekThinkingConfigTest` constructor call; adding the missing "deepseek" backend restored compilation, and the test suite passes. Final `./gradlew test` passed.
+- Final `./gradlew runGameTest` ran 594 tests; the six new cases passed. The sole failure remains the Wave 1 baseline `DeathRecoveryMissionGameTests.haveItemSurvivesDeathRecoveryAndPreservesQueuedMineOre` (`missing result for resumed mission`). Final log: `/tmp/mcaiplayer-wave2-rungametest-final3.log`; XML: `build/test-results/gametest/TEST-aibot-gametest.xml`.
+- `git diff --check` passed. The new test entrypoint is registered once; no temporary probe files or backups remain. No production server, jar, configuration, or world was changed.
+- 2026-09-25: Wave 2 Task 1 completed with the above verification boundary. The known DeathRecovery failure predates this task and remains visible for later full verification.

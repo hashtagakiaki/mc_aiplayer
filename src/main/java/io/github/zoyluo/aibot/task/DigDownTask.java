@@ -193,6 +193,11 @@ public final class DigDownTask extends AbstractTask implements CheckpointableTas
         return true;
     }
 
+    @Override
+    public WatchdogPolicy watchdogPolicy() {
+        return WatchdogPolicy.TASK_MANAGED; // Block-break no-progress and bounded return/total deadlines.
+    }
+
     /**
      * A nearby observed lava cell closes this descent entry; the safe response is to repay the
      * task's factual staircase debt, not to hand a sealed underground pose to generic Evade.

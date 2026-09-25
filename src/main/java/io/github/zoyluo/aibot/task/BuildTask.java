@@ -103,6 +103,11 @@ public final class BuildTask extends AbstractTask {
     }
 
     @Override
+    public WatchdogPolicy watchdogPolicy() {
+        return WatchdogPolicy.TASK_MANAGED; // build_timeout and per-target move/mining limits own progress.
+    }
+
+    @Override
     protected void onStart(AIPlayerEntity bot) {
         nextIndex = 0;
         buildTargetTick = 0;

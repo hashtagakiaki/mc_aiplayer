@@ -232,6 +232,11 @@ public final class CreeperDefenseTask extends AbstractTask {
     }
 
     @Override
+    public WatchdogPolicy watchdogPolicy() {
+        return WatchdogPolicy.TASK_MANAGED; // Displacement, wall-build and owner-lifetime watchdogs.
+    }
+
+    @Override
     protected void onStart(AIPlayerEntity bot) {
         phase = Phase.ESCAPE;
         trackedCreeperId = null;

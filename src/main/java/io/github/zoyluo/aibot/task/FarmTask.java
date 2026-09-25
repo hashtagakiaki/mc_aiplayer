@@ -102,6 +102,19 @@ public final class FarmTask extends AbstractTask {
     }
 
     @Override
+    public WatchdogPolicy watchdogPolicy() {
+        if (keepTending && produceItem == null && phase == Phase.DONE) {
+            return WatchdogPolicy.INTENTIONALLY_ONGOING;
+        }
+        // A quota farm may wait for a crop it has actually observed as immature. Its own 12000
+        // tick quota deadline bounds this wait; the shared short watchdog must not cut it off.
+        if (waitingForMaturity) {
+            return WatchdogPolicy.TASK_MANAGED;
+        }
+        return super.watchdogPolicy();
+    }
+
+    @Override
     protected void onStart(AIPlayerEntity bot) {
         phase = Phase.SURVEY;
         lastDepositActionCount = completedActions;
@@ -276,6 +289,7 @@ public final class FarmTask extends AbstractTask {
             note = result.reason();
         } else {
             completedActions++;
+            recordProgressEvidence();
         }
         phase = Phase.NEXT;
     }
@@ -389,6 +403,7 @@ public final class FarmTask extends AbstractTask {
             return;
         }
         completedActions++;
+        recordProgressEvidence();
         // 收割产出/种子是地上的 ItemEntity(FarmAction.harvest 用 breakBlock dropStacks=true 掉落,不直接入包)。
         // bot 在 reach 距离(≤4.5 格)收割,脚下 1 格外的掉落 vanilla 自动拾取够不到 → 必须强制拾取,
         // 否则 countItem(produce) 永不增、收割/种田目标永不完成(farm_wheat_from_scratch 实测超时、背包 0 小麦)。

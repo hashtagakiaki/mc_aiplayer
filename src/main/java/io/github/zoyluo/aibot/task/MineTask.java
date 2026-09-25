@@ -113,6 +113,9 @@ public final class MineTask extends AbstractTask {
 
     private void mine(AIPlayerEntity bot) {
         if (targetPos == null || !bot.getServerWorld().getBlockState(targetPos).isOf(targetBlock)) {
+            if (targetPos != null && bot.getServerWorld().getBlockState(targetPos).isAir()) {
+                recordProgressEvidence();
+            }
             miner.cancel(bot);
             pickupTicks = 120;
             phase = Phase.PICKING_UP;
@@ -120,6 +123,9 @@ public final class MineTask extends AbstractTask {
         }
         // P1-a:挖掘走 BlockMiner(只在空闲发起、绝不重发清零进度);破块/超时进入拾取阶段。
         BlockMiner.Status status = miner.tick(bot);
+        if (status == BlockMiner.Status.DONE) {
+            recordProgressEvidence();
+        }
         if (status == BlockMiner.Status.DONE || status == BlockMiner.Status.FAILED) {
             pickupTicks = 120;
             phase = Phase.PICKING_UP;

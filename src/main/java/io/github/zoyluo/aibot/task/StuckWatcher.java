@@ -5,9 +5,7 @@ import io.github.zoyluo.aibot.entity.AIPlayerEntity;
 import io.github.zoyluo.aibot.log.BotLog;
 import io.github.zoyluo.aibot.log.LogCategory;
 import io.github.zoyluo.aibot.manager.AIPlayerManager;
-import net.minecraft.item.ItemStack;
 import net.minecraft.server.MinecraftServer;
-import net.minecraft.util.math.BlockPos;
 
 import java.util.Map;
 import java.util.Optional;
@@ -32,14 +30,19 @@ public final class StuckWatcher {
         int now = server.getTicks();
         int window = AIBotConfig.get().watchdog().stuckWindowTicks();
         Optional<Task> active = TaskManager.INSTANCE.getActive(bot);
-        if (active.isEmpty() || active.get().state() != TaskState.RUNNING || active.get().isWaiting()) {
+        if (active.isEmpty() || active.get().state() != TaskState.RUNNING) {
             samples.remove(bot.getUuid());
             return;
         }
 
         Task task = active.get();
-        Sample current = new Sample(task, bot.getBlockPos().toImmutable(),
-                task.progress(), inventoryTotal(bot), now);
+        Task.WatchdogPolicy policy = task.watchdogPolicy();
+        if (policy != Task.WatchdogPolicy.MONITOR_EVIDENCE) {
+            samples.remove(bot.getUuid());
+            return;
+        }
+
+        Sample current = new Sample(task, task.progressEvidence(), now);
         Sample previous = samples.get(bot.getUuid());
         if (previous == null || previous.changed(current)) {
             samples.put(bot.getUuid(), current);
@@ -61,7 +64,8 @@ public final class StuckWatcher {
                 "reason", reason,
                 "window_ticks", window,
                 "progress", task.progress(),
-                "pos", current.pos().toShortString());
+                "evidence", current.progressEvidence(),
+                "pos", bot.getBlockPos().toShortString());
     }
 
     public boolean reset(AIPlayerEntity bot) {
@@ -72,23 +76,9 @@ public final class StuckWatcher {
         samples.clear();
     }
 
-    private static int inventoryTotal(AIPlayerEntity bot) {
-        int total = 0;
-        for (ItemStack stack : bot.getInventory().main) {
-            total += stack.getCount();
-        }
-        for (ItemStack stack : bot.getInventory().offHand) {
-            total += stack.getCount();
-        }
-        return total;
-    }
-
-    private record Sample(Task task, BlockPos pos, double progress, int inventoryTotal, int sinceTick) {
+    private record Sample(Task task, long progressEvidence, int sinceTick) {
         private boolean changed(Sample other) {
-            return task != other.task
-                    || !pos.equals(other.pos)
-                    || Math.abs(progress - other.progress) > 0.0001D
-                    || inventoryTotal != other.inventoryTotal;
+            return task != other.task || other.progressEvidence > progressEvidence;
         }
     }
 }

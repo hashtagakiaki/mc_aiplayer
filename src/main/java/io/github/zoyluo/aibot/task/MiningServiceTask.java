@@ -668,6 +668,11 @@ public final class MiningServiceTask extends AbstractTask implements Checkpointa
     }
 
     @Override
+    public WatchdogPolicy watchdogPolicy() {
+        return WatchdogPolicy.TASK_MANAGED; // Service phase timeout and shared 600-tick no-progress fuse.
+    }
+
+    @Override
     protected void onStart(AIPlayerEntity bot) {
         if (invalidCheckpoint) {
             fail("mining_service_invalid_checkpoint");

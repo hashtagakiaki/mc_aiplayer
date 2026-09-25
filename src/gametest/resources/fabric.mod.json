@@ -35,7 +35,8 @@
       "io.github.zoyluo.aibot.task.SmeltFurnacePlacementGameTests",
       "io.github.zoyluo.aibot.task.MiningServiceResourceGameTests",
       "io.github.zoyluo.aibot.task.OreDigPickupGameTests",
-      "io.github.zoyluo.aibot.task.GatherPickupGameTests"
+      "io.github.zoyluo.aibot.task.GatherPickupGameTests",
+      "io.github.zoyluo.aibot.task.TaskProgressWatchdogGameTests"
     ]
   },
   "depends": {

@@ -13,7 +13,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class DeepSeekThinkingConfigTest {
     private static AIBotConfig.DeepSeek deepSeek(Boolean thinking, String effort) {
         return new AIBotConfig.DeepSeek(
-                "key", "https://api.deepseek.com", "deepseek-v4-flash",
+                "deepseek", "key", "https://api.deepseek.com", "deepseek-v4-flash",
                 8192, 0.3D, 60, 3, 500, thinking, effort);
     }
 

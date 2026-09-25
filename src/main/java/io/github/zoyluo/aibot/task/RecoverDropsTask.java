@@ -74,6 +74,11 @@ public final class RecoverDropsTask extends AbstractTask {
     }
 
     @Override
+    public WatchdogPolicy watchdogPolicy() {
+        return WatchdogPolicy.TASK_MANAGED; // Despawn budget and MAX_ELAPSED bound recovery.
+    }
+
+    @Override
     protected void onStart(AIPlayerEntity bot) {
         if (bot.getServer().getTicks() - deathTick > DESPAWN_BUDGET) {
             fail("drops_expired");

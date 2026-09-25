@@ -78,6 +78,11 @@ public final class MiningBarricadeTask extends AbstractTask {
     }
 
     @Override
+    public WatchdogPolicy watchdogPolicy() {
+        return WatchdogPolicy.TASK_MANAGED; // RETREAT_LIMIT and SEAL_NO_PROGRESS_LIMIT bound each phase.
+    }
+
+    @Override
     protected void onStart(AIPlayerEntity bot) {
         phase = Phase.RETREAT;
         phaseStartedElapsed = 0;

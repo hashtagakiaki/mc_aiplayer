@@ -211,6 +211,11 @@ public final class AcquireWaterTask extends AbstractTask implements Checkpointab
     }
 
     @Override
+    public WatchdogPolicy watchdogPolicy() {
+        return WatchdogPolicy.TASK_MANAGED; // Phase-specific path/search/return limits and hard budget.
+    }
+
+    @Override
     protected void onStart(AIPlayerEntity bot) {
         if (invalidCheckpoint) {
             fail("acquire_water_invalid_checkpoint");

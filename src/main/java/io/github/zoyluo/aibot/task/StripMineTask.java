@@ -363,6 +363,7 @@ public final class StripMineTask extends AbstractTask {
             Standability.clearCache();
             currentMiningBlock = null;
             tunnelBlocksMined++;
+            recordProgressEvidence();
             return;
         }
         if (OreScan.adjacentHazard(bot.getServerWorld(), currentMiningBlock)) {
@@ -408,6 +409,7 @@ public final class StripMineTask extends AbstractTask {
             Standability.clearCache();
             currentVeinBlock = null;
             veinBlocksMined++;
+            recordProgressEvidence();
             return;
         }
         if (!OreScan.isOre(bot.getServerWorld().getBlockState(currentVeinBlock), targetOres)) {
@@ -475,6 +477,9 @@ public final class StripMineTask extends AbstractTask {
 
     private void move(AIPlayerEntity bot) {
         if (currentStep == null || near(bot, currentStep.stand())) {
+            if (currentStep != null) {
+                recordProgressEvidence();
+            }
             bot.getActionPack().stopAll();
             phase = Phase.TUNNEL;
             return;

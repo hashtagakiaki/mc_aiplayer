@@ -127,6 +127,11 @@ public final class EmergencyShelterTask extends AbstractTask {
     }
 
     @Override
+    public WatchdogPolicy watchdogPolicy() {
+        return WatchdogPolicy.TASK_MANAGED; // Every recovery/exit phase has a bounded domain watchdog.
+    }
+
+    @Override
     protected void onStart(AIPlayerEntity bot) {
         targets.clear();
         ownedPlacements.clear();

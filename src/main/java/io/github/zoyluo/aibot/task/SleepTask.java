@@ -64,6 +64,11 @@ public final class SleepTask extends AbstractTask {
     }
 
     @Override
+    public WatchdogPolicy watchdogPolicy() {
+        return WatchdogPolicy.TASK_MANAGED; // sleep_timeout bounds the daylight wait.
+    }
+
+    @Override
     protected void onStart(AIPlayerEntity bot) {
         phase = Phase.FIND_BED;
     }

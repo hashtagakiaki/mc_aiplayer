@@ -223,6 +223,11 @@ public final class HuntTask extends AbstractTask implements CheckpointableTask {
     }
 
     @Override
+    public WatchdogPolicy watchdogPolicy() {
+        return WatchdogPolicy.TASK_MANAGED; // no-progress, pickup recovery and task timeout guards.
+    }
+
+    @Override
     protected void onStart(AIPlayerEntity bot) {
         if (invalidCheckpoint) {
             fail("hunt_pickup_invalid_checkpoint");

@@ -132,6 +132,7 @@ public final class BreedTask extends AbstractTask {
             fail("cannot_breed:" + feed.reason());
             return;
         }
+        recordProgressEvidence();
         phase = nextPhase;
     }
 
@@ -142,6 +143,7 @@ public final class BreedTask extends AbstractTask {
                 first.breed(bot.getServerWorld(), second);
             }
             bredPairs++;
+            recordProgressEvidence();
             first = null;
             second = null;
             phase = bredPairs >= targetPairs ? Phase.DONE : Phase.FIND_PAIR;

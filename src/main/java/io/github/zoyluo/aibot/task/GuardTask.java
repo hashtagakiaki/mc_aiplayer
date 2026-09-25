@@ -63,6 +63,11 @@ public final class GuardTask extends AbstractTask {
     }
 
     @Override
+    public WatchdogPolicy watchdogPolicy() {
+        return WatchdogPolicy.INTENTIONALLY_ONGOING;
+    }
+
+    @Override
     protected void onStart(AIPlayerEntity bot) {
         guardPoint = fixedPoint == null ? bot.getBlockPos().toImmutable() : fixedPoint;
         CombatCore.equipMelee(bot);

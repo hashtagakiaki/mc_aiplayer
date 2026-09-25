@@ -69,6 +69,13 @@ public final class MoveTask extends AbstractTask {
     }
 
     @Override
+    public WatchdogPolicy watchdogPolicy() {
+        // PathExecutor owns route-stall recovery; digging owns a block/tick guard; this task also
+        // has a finite end-to-end timeout. The generic task window must not interrupt those.
+        return WatchdogPolicy.TASK_MANAGED;
+    }
+
+    @Override
     protected void onStart(AIPlayerEntity bot) {
         // 越界目标快速认输:y 超出世界范围(虚空下/建筑上限外)物理不可达,任何走/挖都是空转
         //(实测朝 y330 目标"挖天"耗满 2400t 不认输——空转是实操里最隐蔽的故障形态)。
@@ -181,8 +188,12 @@ public final class MoveTask extends AbstractTask {
             fail("move_dig_no_progress"); // 挖不动/受阻(如四面岩浆)→ 交还,交生存层/大脑
             return;
         }
+        BlockPos miningTarget = miner.target();
         if (DigNav.digStep(bot, miner, goal)) {
             digLastProgressTick = elapsed;
+            if (miningTarget != null && bot.getServerWorld().getBlockState(miningTarget).isAir()) {
+                recordProgressEvidence();
+            }
         }
     }
 
@@ -200,6 +211,9 @@ public final class MoveTask extends AbstractTask {
         boolean arrived = bot.getBlockPos().getSquaredDistance(waypoint) <= WAYPOINT_ARRIVE_SQUARED;
         if (!arrived && !bot.getActionPack().isPathExecutorIdle()) {
             return; // 仍在赶往中继点的路上
+        }
+        if (arrived) {
+            recordProgressEvidence();
         }
         // 经停到达(或这一段提前断了也就地换乘):重新直奔最终 goal——离湖更近、视角变了,直达可能已经可解。
         waypoint = null;

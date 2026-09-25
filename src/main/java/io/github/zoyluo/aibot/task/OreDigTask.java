@@ -385,6 +385,12 @@ public final class OreDigTask extends AbstractTask implements CheckpointableTask
         return true;
     }
 
+    @Override
+    public WatchdogPolicy watchdogPolicy() {
+        // OreDig owns the physical-break no-progress limit and cumulative hard window.
+        return WatchdogPolicy.TASK_MANAGED;
+    }
+
     // EpisodeMemory 薄包装:排除"够不到/挖空"的矿(TTL 30s 自动复活),goal 级生命周期跨 replan 存活。
     private void excludeOre(AIPlayerEntity bot, BlockPos pos) {
         EpisodeMemory.INSTANCE.exclude(bot.getUuid(), pos, bot.getServer().getTicks(), EpisodeMemory.TTL_SHORT);
@@ -2421,6 +2427,7 @@ public final class OreDigTask extends AbstractTask implements CheckpointableTask
 
     private void noteProgress() {
         lastProgressBudget = totalBudget();
+        recordProgressEvidence();
     }
 
     private static String encodeCheckpointPos(BlockPos pos) {

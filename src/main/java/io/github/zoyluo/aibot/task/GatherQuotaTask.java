@@ -73,6 +73,7 @@ public final class GatherQuotaTask extends AbstractTask {
     private Phase phase = Phase.SURVEY;
     private BlockPos targetPos;
     private int countSoFar;
+    private int highestEvidenceCount;
     private int countBeforeHarvest;
     private int pickupTicks;
     private int harvestStartedTick;
@@ -146,8 +147,16 @@ public final class GatherQuotaTask extends AbstractTask {
     }
 
     @Override
+    public WatchdogPolicy watchdogPolicy() {
+        // Discovery has its own regional no-pickup guard, while every phase has the 6000-tick
+        // hard timeout. A shared position/inventory watchdog would incorrectly abort long searches.
+        return WatchdogPolicy.TASK_MANAGED;
+    }
+
+    @Override
     protected void onStart(AIPlayerEntity bot) {
         countSoFar = countAccepted(bot);
+        highestEvidenceCount = countSoFar;
         phase = countSoFar >= targetCount ? Phase.DONE : Phase.SURVEY;
         stockpileTask = null;
         pickupOrigin = null;
@@ -197,6 +206,10 @@ public final class GatherQuotaTask extends AbstractTask {
         // 工作记忆:记录走过的轨迹(4 格去抖),roam 选点避开已搜过的区域(不再盲目转圈)。
         EpisodeMemory.INSTANCE.recordTrail(bot.getUuid(), "gather", bot.getBlockPos());
         countSoFar = countAccepted(bot);
+        if (countSoFar > highestEvidenceCount) {
+            highestEvidenceCount = countSoFar;
+            recordProgressEvidence();
+        }
         if (countSoFar >= targetCount) {
             bot.getActionPack().stopAll();
             clearPickupLedger();
