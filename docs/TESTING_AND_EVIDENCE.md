@@ -171,3 +171,8 @@ bash scripts/capability_matrix.sh --check docs/CAPABILITY_MATRIX.md
 - LLM story evidence 只能通过手动 workflow 触发，并要求明确确认计费；
 - workflow 在失败时仍上传诊断 artifact；
 - release claim 只能引用校验通过、显式 pin 的 `VERIFIED` bundle。
+
+
+## 復旧中の再起動
+
+Mission checkpoint は補助 recovery stage と未完了の model request を明示的に記録します。再起動時はその補助タスク checkpoint を元の Goal に流用せず破棄し、元の mission ID と retry ledger を維持して live world から再計画します。未完了 request の marker は復元時に一度だけ即時再要求を抑止し、pending のまま固まらないようにします。GameTest は auxiliary stage 後の unload/restore と pending marker の one-shot suppression を固定 fixture で確認します。

@@ -96,6 +96,8 @@ public final class GoalExecutor {
             "snap_dimension", "snap_hunt_raw_meat", "snap_hunt_visited_sectors");
     private static final String AUXILIARY_MINING_CONTINUATION_KEY =
             "aux_mining_continuation";
+    private static final String RECOVERY_PENDING_CHECKPOINT_KEY = "recovery_pending";
+    private static final String RECOVERY_STAGE_CHECKPOINT_KEY = "recovery_stage";
     private static final String CAPACITY_PARENT_DELIVERED_KEY =
             "capacity_parent_delivered";
     private static final String CAPACITY_PARENT_FACE_KEY =
@@ -1387,6 +1389,10 @@ public final class GoalExecutor {
                 huntSearchCursor, restoredSkippedTargets);
         active.huntPickupSettlement = unsettledHuntPickup;
         if (restore != null) {
+            // Recovery leases and auxiliary task instances are process-local. On restart, the
+            // original mission plan is rebuilt from the live world. Never apply the auxiliary
+            // task's checkpoint to a same-kind step in the original plan.
+            active.recoveryCancelled = restore.interruptedRecoveryPending();
             active.completedSteps = (int) Math.min(Integer.MAX_VALUE,
                     (long) restore.completedSteps()
                             + (restoredCommittedCapacityParent ? 1L : 0L));
@@ -2365,6 +2371,12 @@ public final class GoalExecutor {
                     .sorted(Map.Entry.comparingByKey())
                     .forEach(entry -> checkpoint.put("task." + entry.getKey(), entry.getValue()));
         }
+        if (active.recoveryPending) {
+            checkpoint.put(RECOVERY_PENDING_CHECKPOINT_KEY, "true");
+        }
+        if (active.recoveryStage) {
+            checkpoint.put(RECOVERY_STAGE_CHECKPOINT_KEY, "true");
+        }
         if (!active.miningCheckpoint.isEmpty()) {
             active.miningCheckpoint.entrySet().stream()
                     .sorted(Map.Entry.comparingByKey())
@@ -2884,6 +2896,14 @@ public final class GoalExecutor {
                 || !inferredService.orElseThrow().terminalFailure().isBlank())) {
             taskCheckpointKind = GoalStep.Kind.MINING_SERVICE;
         }
+        boolean interruptedRecoveryStage = "true".equals(
+                checkpoint.get(RECOVERY_STAGE_CHECKPOINT_KEY));
+        boolean interruptedRecoveryPending = "true".equals(
+                checkpoint.get(RECOVERY_PENDING_CHECKPOINT_KEY));
+        if (interruptedRecoveryStage || interruptedRecoveryPending) {
+            taskCheckpointKind = null;
+            taskCheckpoint.clear();
+        }
         return new RestoreSeed(
                 missionId,
                 context,
@@ -2914,7 +2934,9 @@ public final class GoalExecutor {
                 missionRecovery.map(MissionRecord.RecoveryState::explorationHighWater).orElse(0),
                 missionRecovery.map(MissionRecord.RecoveryState::itemHighWater).orElse(Map.of()),
                 missionRecovery.map(MissionRecord.RecoveryState::attemptsUsed).orElse(0),
-                missionRecovery.map(MissionRecord.RecoveryState::attemptedMethods).orElse(Set.of()));
+                missionRecovery.map(MissionRecord.RecoveryState::attemptedMethods).orElse(Set.of()),
+                interruptedRecoveryStage,
+                interruptedRecoveryPending);
     }
 
     /**
@@ -2962,6 +2984,13 @@ public final class GoalExecutor {
         }
         if (MissionRecord.decodeRecoveryState(values).isEmpty()) {
             return Optional.of("mission_restore_invalid_mission_recovery_checkpoint");
+        }
+        boolean recoveryPending = values.containsKey(RECOVERY_PENDING_CHECKPOINT_KEY);
+        boolean recoveryStage = values.containsKey(RECOVERY_STAGE_CHECKPOINT_KEY);
+        if (recoveryPending && !"true".equals(values.get(RECOVERY_PENDING_CHECKPOINT_KEY))
+                || recoveryStage && !"true".equals(values.get(RECOVERY_STAGE_CHECKPOINT_KEY))
+                || recoveryPending && recoveryStage) {
+            return Optional.of("mission_restore_invalid_recovery_checkpoint");
         }
         return Optional.empty();
     }
@@ -6392,7 +6421,9 @@ public final class GoalExecutor {
                                int missionExplorationHighWater,
                                Map<String, Integer> missionItemHighWater,
                                int recoveryAttemptsUsed,
-                               Set<String> attemptedRecoveryMethods) {
+                               Set<String> attemptedRecoveryMethods,
+                               boolean interruptedRecoveryStage,
+                               boolean interruptedRecoveryPending) {
     }
 
     private enum CapacityParentNamespace {

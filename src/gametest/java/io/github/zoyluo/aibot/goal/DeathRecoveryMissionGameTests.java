@@ -26,6 +26,8 @@ import net.minecraft.world.GameMode;
 
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.util.Map;
@@ -45,7 +47,8 @@ public final class DeathRecoveryMissionGameTests implements FabricGameTest {
                 new Goal.MineOre(Set.of(Blocks.IRON_ORE), 1),
                 Items.RAW_IRON,
                 new Goal.HaveItem(Items.SWEET_BERRIES, 1),
-                Items.SWEET_BERRIES);
+                Items.SWEET_BERRIES,
+                -1);
     }
 
     @GameTest(templateName = FabricGameTest.EMPTY_STRUCTURE, tickLimit = 200)
@@ -56,7 +59,8 @@ public final class DeathRecoveryMissionGameTests implements FabricGameTest {
                 new Goal.HaveItem(Items.SWEET_BERRIES, 1),
                 Items.SWEET_BERRIES,
                 new Goal.MineOre(Set.of(Blocks.IRON_ORE), 1),
-                Items.RAW_IRON);
+                Items.RAW_IRON,
+                32);
     }
 
     @GameTest(templateName = FabricGameTest.EMPTY_STRUCTURE, tickLimit = 200)
@@ -135,6 +139,110 @@ public final class DeathRecoveryMissionGameTests implements FabricGameTest {
         GoalExecutor.INSTANCE.cancelAll(bot);
         AIPlayerManager.INSTANCE.despawn(world.getServer(), botName);
         context.complete();
+    }
+
+    @GameTest(templateName = FabricGameTest.EMPTY_STRUCTURE, tickLimit = 30)
+    public void recoveryStageRestartReplansOriginalAndKeepsRetryLedger(TestContext context) {
+        String botName = "MissionStageRestartGT";
+        var world = context.getWorld();
+        BlockPos cell = context.getAbsolutePos(new BlockPos(1, 2, 1));
+        prepareCell(world, cell);
+        AIPlayerEntity bot = AIPlayerManager.INSTANCE.spawn(
+                        world.getServer(), botName, world, Vec3d.ofBottomCenter(cell),
+                        0.0F, 0.0F, GameMode.SURVIVAL)
+                .orElseThrow(() -> new IllegalStateException("failed to spawn " + botName));
+        Goal original = new Goal.MineOre(Set.of(Blocks.IRON_ORE), 1);
+        Goal auxiliary = new Goal.HaveItem(Items.SWEET_BERRIES, 1);
+        require(context, GoalExecutor.INSTANCE.submit(bot, original), "original mission submit failed");
+        MissionRuntimeRecord before = GoalExecutor.INSTANCE.captureRuntime(bot);
+        UUID missionId = UUID.fromString(before.active().missionId());
+
+        require(context, GoalExecutor.INSTANCE.applyMissionRecoveryProposal(
+                        bot, missionId, auxiliary, "missing_ore|no_resource_nearby",
+                        "no_resource_nearby: unobserved"),
+                "auxiliary recovery proposal was not accepted");
+        MissionRuntimeRecord staged = GoalExecutor.INSTANCE.captureRuntime(bot);
+        require(context, "true".equals(staged.active().checkpoint().get("recovery_stage")),
+                "active auxiliary stage was not marked in checkpoint");
+        require(context, staged.active().checkpoint().containsKey("task_kind"),
+                "auxiliary task checkpoint fixture was not established");
+        require(context, GoalExecutor.INSTANCE.remainingRecoveryAttempts(bot) == 2,
+                "accepted proposal did not consume exactly one retry");
+
+        GoalExecutor.INSTANCE.unload(bot);
+        GoalExecutor.INSTANCE.restoreRuntime(bot, staged);
+        MissionRuntimeRecord restored = GoalExecutor.INSTANCE.captureRuntime(bot);
+        require(context, restored.active() != null, "original mission was lost on restore");
+        require(context, restored.active().missionId().equals(missionId.toString()),
+                "restore changed original mission identity");
+        require(context, restored.active().spec().toGoal().orElseThrow().equals(original),
+                "restore applied the auxiliary goal to the original mission");
+        require(context, !restored.active().checkpoint().containsKey("recovery_stage"),
+                "interrupted recovery stage marker was not cleared");
+        require(context, GoalExecutor.INSTANCE.remainingRecoveryAttempts(bot) == 2,
+                "restart reset or consumed the retry ledger");
+        require(context, TaskManager.INSTANCE.activeOrigin(bot)
+                        .map(origin -> origin.kind() == TaskOrigin.Kind.MISSION
+                                && missionId.equals(origin.missionId()))
+                        .orElse(false),
+                "fresh task is not owned by the original mission");
+        GoalExecutor.INSTANCE.cancelAll(bot);
+        AIPlayerManager.INSTANCE.despawn(world.getServer(), botName);
+        context.complete();
+    }
+
+    @GameTest(templateName = FabricGameTest.EMPTY_STRUCTURE, tickLimit = 30)
+    public void pendingRecoveryRestartSuppressesOneImmediateRequest(TestContext context) {
+        String botName = "MissionPendingRestartGT";
+        var world = context.getWorld();
+        BlockPos cell = context.getAbsolutePos(new BlockPos(1, 2, 1));
+        prepareCell(world, cell);
+        AIPlayerEntity bot = AIPlayerManager.INSTANCE.spawn(
+                        world.getServer(), botName, world, Vec3d.ofBottomCenter(cell),
+                        0.0F, 0.0F, GameMode.SURVIVAL)
+                .orElseThrow(() -> new IllegalStateException("failed to spawn " + botName));
+        require(context, GoalExecutor.INSTANCE.submit(
+                        bot, new Goal.HaveItem(Items.IRON_INGOT, 1)),
+                "mission submit failed");
+        MissionRuntimeRecord before = GoalExecutor.INSTANCE.captureRuntime(bot);
+        UUID missionId = UUID.fromString(before.active().missionId());
+        Object active = activePlanForTest(bot);
+        setField(active, "recoveryPending", true);
+        setField(active, "recoveryRequestId", UUID.randomUUID());
+
+        MissionRuntimeRecord pending = GoalExecutor.INSTANCE.captureRuntime(bot);
+        require(context, "true".equals(pending.active().checkpoint().get("recovery_pending")),
+                "pending recovery marker was not persisted");
+        GoalExecutor.INSTANCE.unload(bot);
+        GoalExecutor.INSTANCE.restoreRuntime(bot, pending);
+        Object restoredPlan = activePlanForTest(bot);
+        require(context, (boolean) getField(restoredPlan, "recoveryCancelled"),
+                "restore did not arm one-request suppression");
+        require(context, !((boolean) getField(restoredPlan, "recoveryPending")),
+                "pending remote request remained stuck after restart");
+        boolean requested = requestMissionRecoveryForTest(bot, restoredPlan, "no_path");
+        require(context, !requested, "first post-restart request was not suppressed");
+        require(context, !((boolean) getField(restoredPlan, "recoveryCancelled")),
+                "one-shot suppression was not consumed");
+        require(context, GoalExecutor.INSTANCE.captureRuntime(bot).active().missionId()
+                        .equals(missionId.toString()),
+                "pending recovery restore changed mission identity");
+
+        GoalExecutor.INSTANCE.cancelAll(bot);
+        AIPlayerManager.INSTANCE.despawn(world.getServer(), botName);
+        context.complete();
+    }
+
+    private static boolean requestMissionRecoveryForTest(
+            AIPlayerEntity bot, Object plan, String reason) {
+        try {
+            var method = GoalExecutor.class.getDeclaredMethod(
+                    "requestMissionRecovery", AIPlayerEntity.class, plan.getClass(), String.class);
+            method.setAccessible(true);
+            return (boolean) method.invoke(GoalExecutor.INSTANCE, bot, plan, reason);
+        } catch (ReflectiveOperationException exception) {
+            throw new IllegalStateException(exception);
+        }
     }
 
     @GameTest(templateName = FabricGameTest.EMPTY_STRUCTURE, tickLimit = 30)
@@ -232,17 +340,24 @@ public final class DeathRecoveryMissionGameTests implements FabricGameTest {
                                     Goal activeGoal,
                                     Item activeReward,
                                     Goal queuedGoal,
-                                    Item queuedReward) {
-        Probe probe = startSuspendedMission(context, botName, activeGoal, queuedGoal);
+                                    Item queuedReward,
+                                    int surfaceReturnStartY) {
+        Probe probe = startSuspendedMission(
+                context, botName, activeGoal, queuedGoal, surfaceReturnStartY);
 
         context.runAtTick(SUSPENDED_ASSERT_TICK, () -> assertSuspended(probe));
         context.runAtTick(RESUMED_ASSERT_TICK, () -> {
             assertResumed(probe);
             InventoryAction.giveItem(probe.bot(), new ItemStack(activeReward, 1));
         });
+        for (int tick = RESUMED_ASSERT_TICK + 1; tick <= ALL_COMPLETE_ASSERT_TICK; tick++) {
+            context.runAtTick(tick, () -> captureScenarioResult(probe, queuedReward));
+        }
         context.runAtTick(ACTIVE_COMPLETE_ASSERT_TICK, () -> {
             assertActiveMissionCompletedAndQueuePromoted(probe);
-            InventoryAction.giveItem(probe.bot(), new ItemStack(queuedReward, 1));
+            if (!(queuedGoal instanceof Goal.MineOre)) {
+                InventoryAction.giveItem(probe.bot(), new ItemStack(queuedReward, 1));
+            }
         });
         context.runAtTick(ALL_COMPLETE_ASSERT_TICK, () -> {
             assertAllCompleted(probe);
@@ -254,9 +369,13 @@ public final class DeathRecoveryMissionGameTests implements FabricGameTest {
     private static Probe startSuspendedMission(TestContext context,
                                                String botName,
                                                Goal activeGoal,
-                                               Goal queuedGoal) {
+                                               Goal queuedGoal,
+                                               int surfaceReturnStartY) {
         var world = context.getWorld();
         BlockPos cell = context.getAbsolutePos(new BlockPos(1, 2, 1));
+        if (surfaceReturnStartY >= 0) {
+            cell = cell.withY(surfaceReturnStartY);
+        }
         prepareCell(world, cell);
         AIPlayerEntity bot = AIPlayerManager.INSTANCE.spawn(
                         world.getServer(), botName, world, Vec3d.ofBottomCenter(cell),
@@ -274,6 +393,19 @@ public final class DeathRecoveryMissionGameTests implements FabricGameTest {
         long resultBaseline = GoalExecutor.INSTANCE.lastResult(bot).map(GoalResult::sequence).orElse(0L);
         require(context, GoalExecutor.INSTANCE.submit(bot, activeGoal), "active goal setup failed: " + activeGoal);
         require(context, GoalExecutor.INSTANCE.submit(bot, queuedGoal), "queued goal setup failed: " + queuedGoal);
+        if (surfaceReturnStartY == 32) {
+            // Preserve the Y=32 mission origin/exit anchor, then model a one-block downward
+            // displacement before death. On resume the strict surface gate must make the bot
+            // climb back to Y=32 instead of accepting the adjacent Y=31 egress.
+            BlockPos displaced = cell.down();
+            world.setBlockState(displaced.down(), Blocks.STONE.getDefaultState(),
+                    Block.NOTIFY_LISTENERS);
+            world.setBlockState(displaced, Blocks.AIR.getDefaultState(), Block.NOTIFY_LISTENERS);
+            prepareShortSurfaceExit(world, displaced);
+            bot.teleport(world, displaced.getX() + 0.5D, displaced.getY(),
+                    displaced.getZ() + 0.5D, Set.of(), 0.0F, 0.0F, true);
+            bot.setVelocity(Vec3d.ZERO);
+        }
         MissionRuntimeRecord initial = GoalExecutor.INSTANCE.captureRuntime(bot);
         require(context, initial.active() != null, "active mission was not captured");
         UUID missionId = UUID.fromString(initial.active().missionId());
@@ -291,7 +423,8 @@ public final class DeathRecoveryMissionGameTests implements FabricGameTest {
         TaskManager.INSTANCE.assign(bot,
                 new RecoverDropsTask(bot.getBlockPos(), bot.getServer().getTicks()),
                 TaskOrigin.safety("gametest_death_recovery"));
-        return new Probe(context, botName, bot, activeGoal, queuedGoal, missionId, resultBaseline);
+        return new Probe(context, botName, bot, activeGoal, queuedGoal, missionId, resultBaseline,
+                new AtomicReference<>(), new AtomicReference<>(), new AtomicReference<>(), new AtomicBoolean());
     }
 
     private static void assertSuspended(Probe probe) {
@@ -329,22 +462,43 @@ public final class DeathRecoveryMissionGameTests implements FabricGameTest {
     }
 
     private static void assertActiveMissionCompletedAndQueuePromoted(Probe probe) {
-        GoalResult result = GoalExecutor.INSTANCE.lastResult(probe.bot())
-                .orElseThrow(() -> failure(probe, "missing result for resumed mission"));
+        if (probe.activeGoal() instanceof Goal.HaveItem) {
+            BlockPos completionPosition = probe.activeCompletionPosition().get();
+            require(probe, completionPosition != null && completionPosition.getY() >= 32,
+                    "surface return did not reach the surface band before mission completion");
+        }
+        GoalResult result = probe.activeResult().get();
+        if (result == null) {
+            result = GoalExecutor.INSTANCE.lastResult(probe.bot())
+                    .filter(candidate -> candidate.missionId().equals(probe.missionId()))
+                    .orElseThrow(() -> failure(probe, "missing result for resumed mission"));
+        }
         require(probe, result.sequence() > probe.resultBaseline(), "result sequence did not advance");
         require(probe, result.missionId().equals(probe.missionId()), "completed result changed missionId");
         require(probe, result.goal().equals(probe.activeGoal()), "wrong goal completed after recovery");
         require(probe, result.status() == GoalResult.Status.COMPLETED,
                 "resumed mission ended as " + result.status() + ": " + result.reason());
-        require(probe, GoalExecutor.INSTANCE.isActiveGoal(probe.bot(), probe.queuedGoal()),
-                "preserved queued mission was not promoted");
+        GoalResult queuedResult = probe.queuedResult().get();
+        if (queuedResult == null) {
+            require(probe, GoalExecutor.INSTANCE.isActiveGoal(probe.bot(), probe.queuedGoal()),
+                    "preserved queued mission was not promoted");
+        } else {
+            require(probe, queuedResult.goal().equals(probe.queuedGoal()),
+                    "wrong queued goal completed before active assertion");
+            require(probe, queuedResult.status() == GoalResult.Status.COMPLETED,
+                    "queued mission ended as " + queuedResult.status() + ": " + queuedResult.reason());
+        }
         require(probe, GoalExecutor.INSTANCE.queuedGoalCount(probe.bot()) == 0,
                 "promoted queue still contains a duplicate mission");
     }
 
     private static void assertAllCompleted(Probe probe) {
-        GoalResult result = GoalExecutor.INSTANCE.lastResult(probe.bot())
-                .orElseThrow(() -> failure(probe, "missing result for preserved queued mission"));
+        GoalResult result = probe.queuedResult().get();
+        if (result == null) {
+            result = GoalExecutor.INSTANCE.lastResult(probe.bot())
+                    .filter(candidate -> candidate.goal().equals(probe.queuedGoal()))
+                    .orElseThrow(() -> failure(probe, "missing result for preserved queued mission"));
+        }
         require(probe, result.goal().equals(probe.queuedGoal()), "wrong queued goal completed");
         require(probe, result.status() == GoalResult.Status.COMPLETED,
                 "queued mission ended as " + result.status() + ": " + result.reason());
@@ -362,6 +516,36 @@ public final class DeathRecoveryMissionGameTests implements FabricGameTest {
         }
         world.setBlockState(center, Blocks.AIR.getDefaultState(), Block.NOTIFY_LISTENERS);
         world.setBlockState(center.up(), Blocks.AIR.getDefaultState(), Block.NOTIFY_LISTENERS);
+    }
+
+    private static void captureScenarioResult(Probe probe, Item queuedReward) {
+        GoalResult result = GoalExecutor.INSTANCE.lastResult(probe.bot()).orElse(null);
+        if (result == null || result.sequence() <= probe.resultBaseline()) return;
+        if (result.missionId().equals(probe.missionId())) {
+            if (probe.activeResult().compareAndSet(null, result)) {
+                probe.activeCompletionPosition().set(probe.bot().getBlockPos());
+            }
+            if (probe.queuedGoal() instanceof Goal.MineOre
+                    && probe.queuedRewardGranted().compareAndSet(false, true)) {
+                // Supply the queued mine output only after the active mission result is recorded.
+                InventoryAction.giveItem(probe.bot(), new ItemStack(queuedReward, 1));
+            }
+        } else if (result.goal().equals(probe.queuedGoal())) {
+            probe.queuedResult().compareAndSet(null, result);
+        }
+    }
+
+    private static void prepareShortSurfaceExit(
+            net.minecraft.server.world.ServerWorld world, BlockPos start) {
+        // The recovered bot starts one block below the deterministic surface threshold. Leave
+        // its north stair and the adjacent supported exit open; the task must physically reach
+        // Y=32 and prove a reusable surface edge before the original berry mission can finish.
+        for (int north = 0; north <= 2; north++) {
+            for (int dy = 1; dy <= 3; dy++) {
+                world.setBlockState(start.add(0, dy, -north),
+                        Blocks.AIR.getDefaultState(), Block.NOTIFY_LISTENERS);
+            }
+        }
     }
 
     private static void cleanup(Probe probe) {
@@ -392,6 +576,10 @@ public final class DeathRecoveryMissionGameTests implements FabricGameTest {
                          Goal activeGoal,
                          Goal queuedGoal,
                          UUID missionId,
-                         long resultBaseline) {
+                         long resultBaseline,
+                         AtomicReference<GoalResult> activeResult,
+                         AtomicReference<GoalResult> queuedResult,
+                         AtomicReference<BlockPos> activeCompletionPosition,
+                         AtomicBoolean queuedRewardGranted) {
     }
 }

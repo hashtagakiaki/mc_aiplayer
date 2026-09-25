@@ -135,7 +135,7 @@ Full verification:
   - Verify: 素材補給後の原目標再開、同一案拒否、観測範囲で未発見/権限拒否の分離、実行中のcancel/replaceと遅延応答、未対応の必要操作がない場合のbounded failureを固定応答GameTestで確認。
   - Expected: LLMは次の手段の提案だけを行い、同じ失敗を言い換えて繰り返せず、前提準備を最終成果として誤報告しない。
   - Commit: `feat: recover failed goals through bounded mission actions`。
-- Wave 4, Task 1: 統合・永続化・利用者向け挙動を検証する。
+- [x] Wave 4, Task 1: 統合・永続化・利用者向け挙動を検証する。
   - Writes: 必要な統合修正、`README.md`, `docs/TESTING_AND_EVIDENCE.md`。
   - Reads: Wave 2/3の変更一式と現行の検証手順。
   - Change: 端末結果、復旧中、予算到達を区別し、実装済みの挙動と証拠範囲を文書化する。
@@ -181,3 +181,12 @@ Full verification:
 - Cancel/reset/config invalidation clears the pending request only when Mission and request IDs match; a late response is discarded. Ordinary new user messages preserve ongoing Mission behavior. Fixed-response GameTests cover typed parsing, same-Mission recovery, already-satisfied proposal resume, and cancel/pending/late-response behavior. A JUnit fixture checks permission/unknown classification.
 - `./gradlew test compileGametestJava` passed. Final `./gradlew runGameTest` executed 598 cases: all three new recovery cases passed; only the existing `DeathRecoveryMissionGameTests.haveItemSurvivesDeathRecoveryAndPreservesQueuedMineOre` baseline failed (`missing result for resumed mission`). XML: `build/test-results/gametest/TEST-aibot-gametest.xml`. `git diff --check` passed.
 - 2026-09-25: Wave 3 Task 1 implemented by gpt-6-luna. The fixed response is validated at parser/lease and Mission handoff boundaries; the test does not replace the HTTP transport. Pending auxiliary-stage restoration across a process restart remains for Wave 4 integration review.
+
+
+### Wave 4 Task 1 evidence
+
+- Recovery checkpoints now persist `recovery_stage` and `recovery_pending`. After restart, an interrupted auxiliary task checkpoint is discarded, the original Mission ID and retry ledger are retained, and the original goal is freshly planned from current world state. A restored pending-request marker suppresses one immediate repeat and is then consumed.
+- Added lifecycle GameTests for accepted auxiliary stage → checkpoint/unload/restore → original mission and retry budget preserved with fresh mission-owned task; and pending request restore → one immediate recovery request suppressed. Both pass in the full suite.
+- Fixed the historical `DeathRecoveryMissionGameTests.haveItemSurvivesDeathRecoveryAndPreservesQueuedMineOre` fixture without weakening its mission/queue assertions. Its old setup began near Y=-57 while the HaveItem recovery requires a physical return to the Y>=32 surface band, but asserted completion after only 20 ticks. The new fixture preserves an original Y=32 surface anchor, places the bot one block below it before death, and gives it an observable supported route back. It records active mission completion position before the queued MineOre starts descending, so the surface assertion measures the recovery result rather than later queue movement. The queued raw-iron reward is supplied only after the original Mission result is captured.
+- `./gradlew compileGametestJava` passed. `./gradlew runGameTest` ran 600 cases with 0 failures. `./gradlew test` passed. `./gradlew build` passed (including its GameTest dependency). `bash scripts/persistence_restart_test.sh` passed at `build/persistence-restart/20260925T052422Z-208075-18232`. `git diff --check` passed. No production server, jar deployment, configuration, or world was changed.
+- Verification does not preserve the in-flight LLM request or continue an auxiliary action after restart: it deliberately discards those ephemeral operations and restarts the original goal. Current evidence validates that boundary and retry budget, not real HTTP transport continuity.

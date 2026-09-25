@@ -66,7 +66,7 @@ flowchart TB
 
 The nine Goal variants cover item acquisition, pickaxe tiers, ore, crops, armor, workstations, stockpiles, food, and blueprint builds. Goal completion is evaluated as a typed postcondition, so a Task ending is not automatically treated as mission success.
 
-Runtime control supports cancel/replace and nested pause/resume. Bot, mission, checkpoint, and shared-job state is written through a versioned atomic snapshot. Restart restoration reopens stale job leases instead of trusting an old process owner.
+Runtime control supports cancel/replace and nested pause/resume. Bot, mission, checkpoint, and shared-job state is written through a versioned atomic snapshot. Restart restoration reopens stale job leases instead of trusting an old process owner. An interrupted model recovery request or auxiliary recovery step is discarded on restart; the original mission and its bounded retry ledger are restored and freshly planned from the live world. A pending request suppresses one immediate repeat so the same failure is not submitted twice at the restart boundary.
 
 Finite tasks are monitored by a configured no-progress window. A task can pause that monitor only while it has a concrete wait condition, such as an observed immature crop, or when the command is intentionally ongoing. If a task stalls, the task manager settles it with one shared failure reason; the goal executor then uses its existing bounded deterministic replanning. A terminal no-progress result is reported without asking the model to recreate the failed work. See [Testing and evidence](docs/TESTING_AND_EVIDENCE.md) for the verification boundary.
 
